@@ -1,0 +1,29 @@
+# Environments
+.env
+venv/
+env/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Node / Frontend
+node_modules/
+dist/
+build/
+.npm/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Databases & Logs
+*.log
+neo4j_data/
+*.sqlite3
+*.db

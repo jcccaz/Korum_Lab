@@ -1,0 +1,342 @@
+/* KorumDashboard.css - Gold Noir Aesthetics */
+
+:root {
+  /* Noir Backdrops */
+  --k-bg: #030303;
+  --k-surface: #0a0a0c;
+  --k-surface-hover: #121215;
+  --k-border: #1f1f24;
+  --k-border-light: #2d2d34;
+  
+  /* Gold Accents */
+  --k-accent: #d4af37;
+  --k-accent-glow: rgba(212, 175, 55, 0.2);
+  --k-accent-intense: #f1cf65;
+  --k-accent-bg: rgba(212, 175, 55, 0.05);
+
+  --k-ruby-base: #d4af37; /* Fallback for legacy hooks */
+  
+  /* Typography */
+  --k-text-main: #f5f2ea;
+  --k-text-muted: #847f73;
+  
+  /* Status */
+  --k-success: #52a466;
+  --k-warning: #d99a36;
+  --k-danger: #c94a4a;
+}
+
+body {
+  margin: 0;
+  background-color: var(--k-bg);
+  color: var(--k-text-main);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  letter-spacing: 0.02em;
+}
+
+/* Core Layout */
+.korum-dashboard-container {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: radial-gradient(circle at top right, var(--k-accent-bg), transparent 40%), var(--k-bg);
+  padding: 2rem;
+  box-sizing: border-box;
+}
+
+.korum-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2rem;
+  border-bottom: 1px solid var(--k-border);
+  padding-bottom: 1rem;
+}
+
+.korum-logo {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 1.5rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--k-text-main);
+  text-shadow: 0 0 10px var(--k-accent-glow);
+}
+
+.korum-logo .icon {
+  color: var(--k-accent);
+  filter: drop-shadow(0 0 8px var(--k-accent-glow));
+}
+
+.korum-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.875rem;
+  color: var(--k-text-muted);
+}
+
+.korum-status-dot {
+  width: 8px;
+  height: 8px;
+  background-color: var(--k-accent);
+  border-radius: 50%;
+  box-shadow: 0 0 8px var(--k-accent);
+  animation: pulse 2s infinite;
+}
+
+/* Grid Layout */
+.korum-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  flex: 1;
+}
+
+@media (max-width: 1024px) {
+  .korum-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Card Component */
+.korum-card {
+  background-color: var(--k-surface);
+  border: 1px solid var(--k-border);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.8);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.korum-card-header {
+  padding: 1.25rem 1.5rem;
+  border-bottom: 1px solid var(--k-border);
+  background: linear-gradient(to right, rgba(10, 10, 12, 0.8), rgba(10, 10, 12, 0));
+}
+
+.korum-card-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--k-text-main);
+  margin: 0;
+}
+
+.korum-card-title .icon {
+  color: var(--k-text-muted);
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+.korum-card-content {
+  padding: 1.5rem;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+/* Forms and Inputs */
+.korum-textarea {
+  flex: 1;
+  width: 100%;
+  min-height: 200px;
+  background-color: rgba(0,0,0,0.5);
+  border: 1px solid var(--k-border);
+  border-radius: 8px;
+  color: var(--k-text-main);
+  padding: 1rem;
+  font-family: inherit;
+  font-size: 0.95rem;
+  line-height: 1.6;
+  resize: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  box-sizing: border-box;
+}
+
+.korum-textarea:focus {
+  outline: none;
+  border-color: var(--k-accent);
+  box-shadow: 0 0 0 2px var(--k-accent-glow);
+}
+
+.korum-button-row {
+  display: flex;
+  gap: 1rem;
+  margin-top: auto;
+}
+
+.korum-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1.5rem;
+  background-color: var(--k-accent);
+  color: #000;
+  border: none;
+  border-radius: 8px;
+  font-weight: 700;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  box-shadow: 0 4px 12px var(--k-accent-glow);
+  flex: 1;
+}
+
+.korum-button:hover:not(:disabled) {
+  background-color: var(--k-accent-intense);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px var(--k-accent-glow);
+}
+
+.korum-button:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.korum-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.korum-button.secondary {
+  background-color: transparent;
+  border: 1px solid var(--k-border-light);
+  color: var(--k-text-main);
+  box-shadow: none;
+}
+
+.korum-button.secondary:hover {
+  background-color: var(--k-surface-hover);
+  border-color: var(--k-text-muted);
+}
+
+/* Attributes / Output Section */
+.korum-data-group {
+  margin-bottom: 1.5rem;
+}
+
+.korum-data-group:last-child {
+  margin-bottom: 0;
+}
+
+.korum-data-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  color: var(--k-text-muted);
+  letter-spacing: 0.1em;
+  margin-bottom: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.korum-data-value {
+  font-size: 1rem;
+  color: var(--k-text-main);
+  background-color: rgba(255, 255, 255, 0.02);
+  padding: 0.75rem 1rem;
+  border-radius: 6px;
+  border-left: 2px solid var(--k-border-light);
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.korum-data-value.ruby-border {
+  border-left-color: var(--k-accent);
+  background: linear-gradient(to right, var(--k-accent-bg), transparent 50%);
+}
+
+.korum-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.korum-list li {
+  background-color: rgba(255, 255, 255, 0.02);
+  padding: 0.75rem 1rem;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  display: flex;
+  align-items: stretch;
+  gap: 0.75rem;
+  border: 1px solid var(--k-border);
+  line-height: 1.5;
+}
+
+.korum-list li .bullet {
+  color: var(--k-accent);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.korum-badge {
+  display: inline-block;
+  padding: 0.25rem 0.5rem;
+  background-color: var(--k-accent-bg);
+  color: var(--k-accent);
+  border: 1px solid rgba(212, 175, 55, 0.3);
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-right: 0.5rem;
+}
+
+/* Empty State */
+.korum-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--k-text-muted);
+  gap: 1rem;
+  text-align: center;
+}
+
+.korum-empty-state .icon {
+  width: 3rem;
+  height: 3rem;
+  color: var(--k-border-light);
+  opacity: 0.5;
+}
+
+/* Animations */
+@keyframes pulse {
+  0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(212, 175, 55, 0.5); }
+  70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(212, 175, 55, 0); }
+  100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(212, 175, 55, 0); }
+}
+
+.scan-line {
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--k-accent), transparent);
+  width: 100%;
+  position: absolute;
+  top: 0;
+  left: -100%;
+  animation: scan 4s infinite ease-in-out;
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+@keyframes scan {
+  0% { left: -100%; }
+  100% { left: 100%; }
+}

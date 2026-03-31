@@ -1,0 +1,4 @@
+Project FrankNet:
+We are deciding whether to replace a failing router or reroute traffic.
+Packet loss has increased 25%.
+Technicians report intermittent outages.
