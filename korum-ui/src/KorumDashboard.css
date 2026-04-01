@@ -61,7 +61,7 @@ body {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  color: var(--k-text-main);
+  color: var(--k-accent);
   text-shadow: 0 0 10px var(--k-accent-glow);
 }
 
@@ -258,7 +258,7 @@ body {
 .korum-data-label {
   font-size: 0.75rem;
   text-transform: uppercase;
-  color: var(--k-text-muted);
+  color: var(--k-accent);
   letter-spacing: 0.1em;
   margin-bottom: 0.5rem;
   display: flex;

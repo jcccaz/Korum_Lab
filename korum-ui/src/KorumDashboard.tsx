@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Database, Brain, ShieldAlert, FileText, Network, Search, Activity, Terminal, CheckCircle2, ChevronRight, AlertTriangle, AlertCircle, Cpu, FileCheck, Target, Info } from "lucide-react";
+import { Database, Brain, ShieldAlert, FileText, Network, Search, Activity, Terminal, CheckCircle2, ChevronRight, AlertTriangle, AlertCircle, Cpu, FileCheck, Target, Info, RotateCcw, TrendingUp, TrendingDown, Minus, Scale, ListChecks, XCircle } from "lucide-react";
 import "./KorumDashboard.css";
 
 const starterText = `Project FrankNet:\nWe are deciding whether to replace a failing router or reroute traffic.\nPacket loss has increased 25%.\nTechnicians report intermittent outages.`;
@@ -46,6 +46,22 @@ const STRATEGY_PRESETS: Record<string, Strategy> = {
   },
 };
 
+// --- Governor Verdict Shape ---
+interface GovernorVerdict {
+  final_decision: "GO" | "NO-GO" | "CONDITIONAL";
+  decision_status: string;
+  confidence_score: number;
+  red_team_verdict: "SUSTAINED" | "PARTIALLY SUSTAINED" | "REJECTED";
+  new_risks_identified: string[];
+  critical_unresolved_risks: string[];
+  required_validations: string[];
+  decision_conditions: string[];
+  failure_triggers: string[];
+  monitoring_requirements: string[];
+  governor_rationale: string;
+  rule_flags: string[];
+}
+
 // --- API Response Shape ---
 interface ExtractResult {
   project: string;
@@ -60,6 +76,8 @@ interface ExtractResult {
   status_color: string;
   governance_reason: string[];
   strategy_applied: { decision_type: string; objective: string } | null;
+  rebuttal_applied: boolean;
+  score_delta: number | null;
   graph_injection_status?: string;
 }
 
@@ -69,6 +87,12 @@ export default function KorumLabDashboard() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [result, setResult] = useState<ExtractResult | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [rebuttalText, setRebuttalText] = useState<string>("");
+  const [isRebutting, setIsRebutting] = useState(false);
+  const [redTeamOutput, setRedTeamOutput] = useState<string | null>(null);
+  const [isAttacking, setIsAttacking] = useState(false);
+  const [governorVerdict, setGovernorVerdict] = useState<GovernorVerdict | null>(null);
+  const [isResolving, setIsResolving] = useState(false);
 
   const handleExtract = async () => {
     setIsProcessing(true);
@@ -102,6 +126,101 @@ export default function KorumLabDashboard() {
     setInputText("");
     setResult(null);
     setErrorMsg(null);
+    setRebuttalText("");
+  };
+
+  const handleRedTeamAttack = async () => {
+    if (!result) return;
+    setIsAttacking(true);
+    setRedTeamOutput(null);
+
+    const summary = [
+      `Project: ${result.project}`,
+      `Decision: ${result.decision_context}`,
+      `Recommendation: ${result.recommendation}`,
+      `Confidence: ${result.confidence_score}`,
+      `Status: ${result.governance_status}`,
+      result.evidence.length ? `Evidence: ${result.evidence.join("; ")}` : "",
+      result.assumptions.length ? `Assumptions: ${result.assumptions.join("; ")}` : "",
+      result.risks.length ? `Risks: ${result.risks.join("; ")}` : "",
+      result.unknowns.length ? `Unknowns: ${result.unknowns.join("; ")}` : "",
+    ].filter(Boolean).join("\n");
+
+    try {
+      const response = await fetch("http://127.0.0.1:8000/api/rebuttal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decision_summary: summary }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Red Team attack failed");
+      setRedTeamOutput(data.rebuttal);
+    } catch (err: any) {
+      setRedTeamOutput(`Error: ${err.message}`);
+    } finally {
+      setIsAttacking(false);
+    }
+  };
+
+  const handleGovernorResolve = async () => {
+    if (!result || !redTeamOutput) return;
+    setIsResolving(true);
+    setGovernorVerdict(null);
+
+    const summary = [
+      `Project: ${result.project}`,
+      `Decision: ${result.decision_context}`,
+      `Recommendation: ${result.recommendation}`,
+      `Confidence: ${result.confidence_score}`,
+      result.evidence.length ? `Evidence: ${result.evidence.join("; ")}` : "",
+      result.assumptions.length ? `Assumptions: ${result.assumptions.join("; ")}` : "",
+      result.risks.length ? `Risks: ${result.risks.join("; ")}` : "",
+      result.unknowns.length ? `Unknowns: ${result.unknowns.join("; ")}` : "",
+    ].filter(Boolean).join("\n");
+
+    try {
+      const response = await fetch("http://127.0.0.1:8000/api/governor", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ original_summary: summary, red_team_attack: redTeamOutput }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Governor resolution failed");
+      setGovernorVerdict(data);
+    } catch (err: any) {
+      setGovernorVerdict(null);
+    } finally {
+      setIsResolving(false);
+    }
+  };
+
+  const handleRebuttal = async () => {
+    if (!rebuttalText.trim() || !result) return;
+    setIsRebutting(true);
+
+    const strategy = selectedStrategy ? STRATEGY_PRESETS[selectedStrategy] : undefined;
+
+    try {
+      const response = await fetch("http://127.0.0.1:8000/api/extract", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: inputText,
+          strategy,
+          rebuttal_text: rebuttalText,
+          previous_score: result.confidence_score,
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Rebuttal evaluation failed");
+      setResult(data);
+      setRebuttalText("");
+    } catch (err: any) {
+      setErrorMsg(err.message || "Rebuttal failed.");
+    } finally {
+      setIsRebutting(false);
+    }
   };
 
   const renderConfidenceRing = (score: number) => {
@@ -289,11 +408,22 @@ export default function KorumLabDashboard() {
                     <div style={{ flex: 1 }}>
                       <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--k-text-muted)', letterSpacing: '0.1em', marginBottom: '4px' }}>
                         AI Confidence Governor
+                        {result.rebuttal_applied && (
+                          <span style={{ marginLeft: '8px', color: 'var(--k-accent)', fontWeight: 600 }}>· REBUTTAL APPLIED</span>
+                        )}
                       </div>
                       <div style={{ fontSize: '1.125rem', fontWeight: 600, color: `var(--k-${result.status_color || 'ruby-base'})`, letterSpacing: '0.05em' }}>
                         {result.governance_status}
                       </div>
                     </div>
+                    {result.score_delta !== null && result.score_delta !== undefined && (
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '0.5rem 0.75rem', borderRadius: '6px', backgroundColor: result.score_delta > 0 ? 'rgba(43,147,72,0.1)' : result.score_delta < 0 ? 'rgba(201,74,74,0.1)' : 'rgba(255,255,255,0.05)', border: `1px solid ${result.score_delta > 0 ? 'var(--k-success)' : result.score_delta < 0 ? 'var(--k-danger)' : 'var(--k-border)'}` }}>
+                        {result.score_delta > 0 ? <TrendingUp size={16} style={{ color: 'var(--k-success)' }} /> : result.score_delta < 0 ? <TrendingDown size={16} style={{ color: 'var(--k-danger)' }} /> : <Minus size={16} style={{ color: 'var(--k-text-muted)' }} />}
+                        <span style={{ fontSize: '0.8rem', fontWeight: 700, color: result.score_delta > 0 ? 'var(--k-success)' : result.score_delta < 0 ? 'var(--k-danger)' : 'var(--k-text-muted)', marginTop: '2px' }}>
+                          {result.score_delta > 0 ? `+${result.score_delta}` : result.score_delta}
+                        </span>
+                      </div>
+                    )}
                   </div>
 
                   {/* Strategy Applied */}
@@ -416,8 +546,200 @@ export default function KorumLabDashboard() {
                     </div>
                   </div>
 
+                  {/* Rebuttal Panel */}
+                  <div style={{ marginTop: '2rem', padding: '1rem', backgroundColor: 'rgba(212,175,55,0.04)', border: '1px solid rgba(212,175,55,0.2)', borderRadius: '8px' }}>
+                    <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'var(--k-accent)', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <RotateCcw size={11} /> Rebuttal / Additional Context
+                    </div>
+                    <textarea
+                      className="korum-textarea"
+                      style={{ minHeight: '100px', fontSize: '0.875rem' }}
+                      value={rebuttalText}
+                      onChange={(e) => setRebuttalText(e.target.value)}
+                      placeholder="Provide missing evidence, clarifications, or additional context to address the escalation triggers..."
+                      spellCheck="false"
+                    />
+                    <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.75rem' }}>
+                      <button
+                        className="korum-button"
+                        style={{ flex: 1 }}
+                        onClick={handleRebuttal}
+                        disabled={isRebutting || !rebuttalText.trim()}
+                      >
+                        {isRebutting ? (
+                          <><Activity size={14} style={{ animation: 'pulse 1s infinite' }} /> Re-Evaluating...</>
+                        ) : (
+                          <><RotateCcw size={14} /> Re-Evaluate</>
+                        )}
+                      </button>
+                      <button
+                        className="korum-button"
+                        style={{ flex: 1, backgroundColor: 'rgba(201,74,74,0.15)', color: 'var(--k-danger)', border: '1px solid rgba(201,74,74,0.4)', boxShadow: 'none' }}
+                        onClick={handleRedTeamAttack}
+                        disabled={isAttacking}
+                      >
+                        {isAttacking ? (
+                          <><Activity size={14} style={{ animation: 'pulse 1s infinite' }} /> Attacking...</>
+                        ) : (
+                          <><ShieldAlert size={14} /> Red Team Attack</>
+                        )}
+                      </button>
+                    </div>
+                    {redTeamOutput && (
+                      <button
+                        className="korum-button"
+                        style={{ width: '100%', marginTop: '0.5rem', backgroundColor: 'rgba(212,175,55,0.1)', color: 'var(--k-accent)', border: '1px solid rgba(212,175,55,0.35)', boxShadow: 'none' }}
+                        onClick={handleGovernorResolve}
+                        disabled={isResolving}
+                      >
+                        {isResolving ? (
+                          <><Activity size={14} style={{ animation: 'pulse 1s infinite' }} /> Governor Resolving...</>
+                        ) : (
+                          <><Scale size={14} /> Governor Resolve</>
+                        )}
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Red Team Output */}
+                  {redTeamOutput && (
+                    <motion.div
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      style={{ marginTop: '1rem', padding: '1rem', backgroundColor: 'rgba(201,74,74,0.06)', border: '1px solid rgba(201,74,74,0.3)', borderRadius: '8px' }}
+                    >
+                      <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'var(--k-danger)', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <ShieldAlert size={11} /> Red Team Challenge — Mistral 7B Local
+                      </div>
+                      <div style={{ fontSize: '0.875rem', color: 'var(--k-text-main)', lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>
+                        {redTeamOutput}
+                      </div>
+                    </motion.div>
+                  )}
+
+                  {/* Governor Verdict Panel */}
+                  {governorVerdict && (
+                    <motion.div
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      style={{ marginTop: '1rem', padding: '1rem', backgroundColor: 'rgba(212,175,55,0.05)', border: '1px solid rgba(212,175,55,0.3)', borderRadius: '8px' }}
+                    >
+                      <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'var(--k-accent)', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <Scale size={11} /> Governor Resolution — Final Ruling
+                      </div>
+
+                      {/* Decision + Score row */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '0.75rem' }}>
+                        <div style={{
+                          padding: '0.4rem 1rem', borderRadius: '6px', fontWeight: 700, fontSize: '0.9rem', letterSpacing: '0.08em',
+                          backgroundColor: governorVerdict.final_decision === 'GO' ? 'rgba(43,147,72,0.15)' : governorVerdict.final_decision === 'NO-GO' ? 'rgba(201,74,74,0.15)' : 'rgba(212,175,55,0.12)',
+                          color: governorVerdict.final_decision === 'GO' ? 'var(--k-success)' : governorVerdict.final_decision === 'NO-GO' ? 'var(--k-danger)' : 'var(--k-accent)',
+                          border: `1px solid ${governorVerdict.final_decision === 'GO' ? 'var(--k-success)' : governorVerdict.final_decision === 'NO-GO' ? 'var(--k-danger)' : 'rgba(212,175,55,0.4)'}`,
+                        }}>
+                          {governorVerdict.decision_status || governorVerdict.final_decision}
+                        </div>
+                        <div style={{ fontSize: '0.85rem', color: 'var(--k-text-muted)' }}>
+                          Adjusted Confidence: <strong style={{ color: 'var(--k-text-main)' }}>{governorVerdict.confidence_score}</strong>
+                        </div>
+                        <div style={{ marginLeft: 'auto', fontSize: '0.75rem', padding: '0.25rem 0.6rem', borderRadius: '4px', border: '1px solid var(--k-border)',
+                          color: governorVerdict.red_team_verdict === 'SUSTAINED' ? 'var(--k-danger)' : governorVerdict.red_team_verdict === 'REJECTED' ? 'var(--k-success)' : 'var(--k-warning)' }}>
+                          Red Team: {governorVerdict.red_team_verdict}
+                        </div>
+                      </div>
+
+                      {/* Rule flags */}
+                      {governorVerdict.rule_flags && governorVerdict.rule_flags.length > 0 && (
+                        <div style={{ marginBottom: '0.75rem' }}>
+                          <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', color: 'var(--k-warning)', marginBottom: '0.4rem', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            <AlertTriangle size={10} /> Rule Flags
+                          </div>
+                          {governorVerdict.rule_flags.map((flag, i) => (
+                            <div key={i} style={{ fontSize: '0.8rem', color: 'var(--k-text-muted)', display: 'flex', gap: '0.5rem', alignItems: 'flex-start', marginBottom: '0.25rem' }}>
+                              <AlertTriangle size={11} style={{ color: 'var(--k-warning)', flexShrink: 0, marginTop: '2px' }} />{flag}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* New risks */}
+                      {governorVerdict.new_risks_identified.length > 0 && (
+                        <div style={{ marginBottom: '0.75rem' }}>
+                          <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', color: 'var(--k-danger)', marginBottom: '0.4rem', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            <XCircle size={10} /> Net-New Risks (from Red Team)
+                          </div>
+                          {governorVerdict.new_risks_identified.map((r, i) => (
+                            <div key={i} style={{ fontSize: '0.8rem', color: 'var(--k-text-muted)', display: 'flex', gap: '0.5rem', alignItems: 'flex-start', marginBottom: '0.25rem' }}>
+                              <ChevronRight size={11} style={{ color: 'var(--k-danger)', flexShrink: 0, marginTop: '2px' }} />{r}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Required validations */}
+                      {governorVerdict.required_validations.length > 0 && (
+                        <div style={{ marginBottom: '0.75rem' }}>
+                          <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', color: 'var(--k-accent)', marginBottom: '0.4rem', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            <ListChecks size={10} /> Required Validations
+                          </div>
+                          {governorVerdict.required_validations.map((v, i) => (
+                            <div key={i} style={{ fontSize: '0.8rem', color: 'var(--k-text-muted)', display: 'flex', gap: '0.5rem', alignItems: 'flex-start', marginBottom: '0.25rem' }}>
+                              <ChevronRight size={11} style={{ color: 'var(--k-accent)', flexShrink: 0, marginTop: '2px' }} />{v}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Decision Conditions */}
+                      {governorVerdict.decision_conditions?.length > 0 && (
+                        <div style={{ marginBottom: '0.75rem' }}>
+                          <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', color: 'var(--k-accent)', marginBottom: '0.4rem', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            <CheckCircle2 size={10} /> Decision Conditions
+                          </div>
+                          {governorVerdict.decision_conditions.map((c, i) => (
+                            <div key={i} style={{ fontSize: '0.8rem', color: 'var(--k-text-muted)', display: 'flex', gap: '0.5rem', alignItems: 'flex-start', marginBottom: '0.25rem' }}>
+                              <ChevronRight size={11} style={{ color: 'var(--k-accent)', flexShrink: 0, marginTop: '2px' }} />{c}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Failure Triggers */}
+                      {governorVerdict.failure_triggers?.length > 0 && (
+                        <div style={{ marginBottom: '0.75rem' }}>
+                          <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', color: 'var(--k-danger)', marginBottom: '0.4rem', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            <XCircle size={10} /> Failure Triggers
+                          </div>
+                          {governorVerdict.failure_triggers.map((t, i) => (
+                            <div key={i} style={{ fontSize: '0.8rem', color: 'var(--k-text-muted)', display: 'flex', gap: '0.5rem', alignItems: 'flex-start', marginBottom: '0.25rem' }}>
+                              <AlertTriangle size={11} style={{ color: 'var(--k-danger)', flexShrink: 0, marginTop: '2px' }} />{t}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Monitoring Requirements */}
+                      {governorVerdict.monitoring_requirements?.length > 0 && (
+                        <div style={{ marginBottom: '0.75rem' }}>
+                          <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', color: 'var(--k-warning)', marginBottom: '0.4rem', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            <Activity size={10} /> Monitoring Requirements
+                          </div>
+                          {governorVerdict.monitoring_requirements.map((m, i) => (
+                            <div key={i} style={{ fontSize: '0.8rem', color: 'var(--k-text-muted)', display: 'flex', gap: '0.5rem', alignItems: 'flex-start', marginBottom: '0.25rem' }}>
+                              <ChevronRight size={11} style={{ color: 'var(--k-warning)', flexShrink: 0, marginTop: '2px' }} />{m}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Rationale */}
+                      <div style={{ fontSize: '0.82rem', color: 'var(--k-text-muted)', lineHeight: 1.7, borderTop: '1px solid var(--k-border)', paddingTop: '0.75rem', fontStyle: 'italic' }}>
+                        {governorVerdict.governor_rationale}
+                      </div>
+                    </motion.div>
+                  )}
+
                   {/* Graph Injection State */}
-                  <div style={{ marginTop: '2rem', padding: '0.75rem', backgroundColor: 'var(--k-surface-hover)', borderRadius: '4px', border: '1px solid var(--k-border)', fontSize: '0.75rem', color: 'var(--k-text-muted)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <div style={{ marginTop: '1rem', padding: '0.75rem', backgroundColor: 'var(--k-surface-hover)', borderRadius: '4px', border: '1px solid var(--k-border)', fontSize: '0.75rem', color: 'var(--k-text-muted)', display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <Network size={14} />
                     <span><strong>Graph Engine Status:</strong> {result.graph_injection_status || 'Waiting...'}</span>
                   </div>
