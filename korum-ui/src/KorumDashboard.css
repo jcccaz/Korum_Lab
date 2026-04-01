@@ -144,6 +144,31 @@ body {
 }
 
 /* Forms and Inputs */
+.korum-select {
+  width: 100%;
+  background-color: rgba(0, 0, 0, 0.5);
+  border: 1px solid var(--k-border);
+  border-radius: 8px;
+  color: var(--k-text-main);
+  padding: 0.75rem 1rem;
+  font-family: inherit;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  appearance: none;
+  box-sizing: border-box;
+}
+
+.korum-select:focus {
+  outline: none;
+  border-color: var(--k-accent);
+  box-shadow: 0 0 0 2px var(--k-accent-glow);
+}
+
+.korum-select option {
+  background-color: #0a0a0c;
+}
+
 .korum-textarea {
   flex: 1;
   width: 100%;

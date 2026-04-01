@@ -13,6 +13,7 @@ def setup_database(session):
         "CREATE CONSTRAINT unknown_item IF NOT EXISTS FOR (n:Unknown) REQUIRE n.detail IS UNIQUE",
         "CREATE CONSTRAINT risk_item IF NOT EXISTS FOR (n:Risk) REQUIRE n.detail IS UNIQUE",
         "CREATE CONSTRAINT recommendation_item IF NOT EXISTS FOR (n:Recommendation) REQUIRE n.detail IS UNIQUE",
+        "CREATE CONSTRAINT strategy_decision_type IF NOT EXISTS FOR (n:Strategy) REQUIRE n.decision_type IS UNIQUE",
     ]
     for q in queries:
         session.run(q)
