@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
 import os
+import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -143,8 +144,7 @@ async def extract_decision(req: ExtractRequest):
         # STEP 3: Graph Ontology Injection (Fail-safe for live demos without Docker running)
         graph_status = "Skipped"
         try:
-            driver = GraphConnection.get_driver()
-            with driver.session() as session:
+            with GraphConnection.get_session() as session:
                 setup_database(session)
                 session.execute_write(insert_extracted_decision, extracted, req.strategy)
             graph_status = "Injected into Neo4j Ontology"
@@ -269,6 +269,172 @@ async def governor_resolution(req: GovernorRequest):
         data["rule_flags"] = rule_flags
         return data
 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# STEP 4: Push to KorumOS Council
+# Takes the Governor verdict and packages it as a pre-tested query for the
+# full KorumOS Neural Council. The council receives a structured brief —
+# evidence, unknowns, risks, and Governor ruling already resolved —
+# so it can focus on execution planning rather than re-deriving the basics.
+# ---------------------------------------------------------------------------
+
+class PushToKorumRequest(BaseModel):
+    project: str
+    decision_context: str
+    evidence: List[str]
+    assumptions: List[str]
+    unknowns: List[str]
+    risks: List[str]
+    recommendation: str
+    governor_verdict: str                        # GO / NO-GO / CONDITIONAL
+    governor_confidence: int                     # 0-100
+    governor_rationale: str
+    required_validations: Optional[List[str]] = []
+    failure_triggers: Optional[List[str]] = []
+    monitoring_requirements: Optional[List[str]] = []
+    mission_type: Optional[str] = "STRATEGY"    # KorumOS mission type / tab
+    workflow: Optional[str] = None              # Override workflow if needed
+
+
+def _build_korum_query(req: PushToKorumRequest) -> str:
+    """
+    Constructs a pre-tested query package for the KorumOS Neural Council.
+    The council inherits all pre-work — it does not re-derive the basics.
+    """
+    evidence_block = "\n".join(f"  - {e}" for e in req.evidence) or "  None confirmed."
+    assumptions_block = "\n".join(f"  - {a}" for a in req.assumptions) or "  None."
+    unknowns_block = "\n".join(f"  - {u}" for u in req.unknowns) or "  None."
+    risks_block = "\n".join(f"  - {r}" for r in req.risks) or "  None."
+    validations_block = "\n".join(f"  - {v}" for v in req.required_validations) or "  None."
+    triggers_block = "\n".join(f"  - {t}" for t in req.failure_triggers) or "  None."
+    monitoring_block = "\n".join(f"  - {m}" for m in req.monitoring_requirements) or "  None."
+
+    return f"""## KORUM LAB PRE-ANALYSIS PACKAGE
+## Project: {req.project}
+
+This decision has been pre-processed through Korum Lab — extraction, adversarial Red Team attack, and Governor arbitration are complete. Do not re-derive what is already established. Build on this foundation.
+
+---
+
+### DECISION CONTEXT
+{req.decision_context}
+
+### VERIFIED EVIDENCE
+{evidence_block}
+
+### KNOWN ASSUMPTIONS (unverified)
+{assumptions_block}
+
+### CRITICAL UNKNOWNS
+{unknowns_block}
+
+### IDENTIFIED RISKS
+{risks_block}
+
+---
+
+### PRE-TEST VERDICT: {req.governor_verdict} (Confidence: {req.governor_confidence}/100)
+{req.governor_rationale}
+
+### REQUIRED VALIDATIONS (must be resolved before execution)
+{validations_block}
+
+### FAILURE TRIGGERS (immediate invalidation events)
+{triggers_block}
+
+### MONITORING REQUIREMENTS (track during and after execution)
+{monitoring_block}
+
+---
+
+### ORIGINAL RECOMMENDATION
+{req.recommendation}
+
+---
+
+### COUNCIL DIRECTIVE
+Run full Neural Council governance on this decision. The pre-analysis has surfaced the key risks, unknowns, and Governor ruling. Your mandate:
+1. Resolve each critical unknown with a specific investigative action or assumption-flag.
+2. Validate or challenge the required validations — are they sufficient to unlock execution?
+3. Stress-test the failure triggers — are there additional invalidation events the pre-analysis missed?
+4. Produce an executable action plan with phased steps, owners, and gating conditions.
+5. Issue a final GO / NO-GO / CONDITIONAL with your own confidence score.
+
+Do not summarize what was already provided. Add intelligence the pre-analysis did not have."""
+
+
+@app.post("/api/push-to-korum")
+async def push_to_korum(req: PushToKorumRequest):
+    """
+    Step 4: Package the Governor verdict as a pre-tested query and submit
+    to the KorumOS Neural Council for full governed decision intelligence.
+
+    Requires KORUMOS_URL and KORUMOS_API_KEY in environment.
+    If KORUMOS_API_KEY is not set, returns the formatted query package
+    so the operator can paste it into KorumOS manually.
+    """
+    korumos_url = os.getenv("KORUMOS_URL", "").rstrip("/")
+    korumos_api_key = os.getenv("KORUMOS_API_KEY", "").strip()
+    query = _build_korum_query(req)
+
+    # --- Fallback: no API key configured — return the package for manual use ---
+    if not korumos_api_key:
+        return {
+            "status": "manual_required",
+            "message": "KORUMOS_API_KEY not configured. Copy the query package below into KorumOS.",
+            "query_package": query,
+            "korumos_url": korumos_url or "https://korum-os.com",
+        }
+
+    if not korumos_url:
+        raise HTTPException(status_code=500, detail="KORUMOS_URL not configured.")
+
+    # --- Live bridge: POST to KorumOS /api/ask ---
+    payload = {
+        "query": query,
+        "mission_type": req.mission_type,
+    }
+    if req.workflow:
+        payload["workflow"] = req.workflow
+
+    headers = {
+        "Authorization": f"Bearer {korumos_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{korumos_url}/api/ask",
+                json=payload,
+                headers=headers,
+            )
+
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                "status": "submitted",
+                "job_id": data.get("job_id"),
+                "poll_url": f"{korumos_url}/api/status/{data.get('job_id')}",
+                "query_package": query,
+                "korumos_response": data,
+            }
+        else:
+            return {
+                "status": "error",
+                "http_status": response.status_code,
+                "detail": response.text,
+                "query_package": query,  # Always return the package so work isn't lost
+            }
+
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail="KorumOS did not respond within 30 seconds. The query package is returned — submit manually if needed.",
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
