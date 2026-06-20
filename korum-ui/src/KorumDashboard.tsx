@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Database, Brain, ShieldAlert, FileText, Network, Search, Activity, Terminal, CheckCircle2, ChevronRight, AlertTriangle, AlertCircle, Cpu, FileCheck, Target, Info, RotateCcw, TrendingUp, TrendingDown, Minus, Scale, ListChecks, XCircle } from "lucide-react";
+import { Database, Brain, ShieldAlert, FileText, Network, Search, Activity, Terminal, CheckCircle2, ChevronRight, AlertTriangle, AlertCircle, Cpu, FileCheck, Target, Info, RotateCcw, TrendingUp, TrendingDown, Minus, Scale, ListChecks, XCircle, Send, Copy, ExternalLink } from "lucide-react";
 import "./KorumDashboard.css";
 
 const starterText = `Project FrankNet:\nWe are deciding whether to replace a failing router or reroute traffic.\nPacket loss has increased 25%.\nTechnicians report intermittent outages.`;
@@ -62,6 +62,18 @@ interface GovernorVerdict {
   rule_flags: string[];
 }
 
+// --- Push-to-KorumOS Response Shape (mirrors api.py's /api/push-to-korum) ---
+interface PushToKorumResult {
+  status: "manual_required" | "submitted" | "error";
+  message?: string;
+  query_package: string;
+  korumos_url?: string;
+  job_id?: string | null;
+  poll_url?: string;
+  http_status?: number;
+  detail?: string;
+}
+
 // --- API Response Shape ---
 interface ExtractResult {
   project: string;
@@ -93,6 +105,9 @@ export default function KorumLabDashboard() {
   const [isAttacking, setIsAttacking] = useState(false);
   const [governorVerdict, setGovernorVerdict] = useState<GovernorVerdict | null>(null);
   const [isResolving, setIsResolving] = useState(false);
+  const [isPushing, setIsPushing] = useState(false);
+  const [pushResult, setPushResult] = useState<PushToKorumResult | null>(null);
+  const [copyConfirmed, setCopyConfirmed] = useState(false);
 
   const handleExtract = async () => {
     setIsProcessing(true);
@@ -127,6 +142,10 @@ export default function KorumLabDashboard() {
     setResult(null);
     setErrorMsg(null);
     setRebuttalText("");
+    setRedTeamOutput(null);
+    setGovernorVerdict(null);
+    setPushResult(null);
+    setCopyConfirmed(false);
   };
 
   const handleRedTeamAttack = async () => {
@@ -191,6 +210,60 @@ export default function KorumLabDashboard() {
       setGovernorVerdict(null);
     } finally {
       setIsResolving(false);
+    }
+  };
+
+  const handlePushToKorum = async () => {
+    if (!result || !governorVerdict) return;
+    setIsPushing(true);
+    setPushResult(null);
+    setCopyConfirmed(false);
+
+    try {
+      const response = await fetch("http://127.0.0.1:8000/api/push-to-korum", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project: result.project,
+          decision_context: result.decision_context,
+          evidence: result.evidence,
+          assumptions: result.assumptions,
+          unknowns: result.unknowns,
+          risks: result.risks,
+          recommendation: result.recommendation,
+          governor_verdict: governorVerdict.final_decision,
+          governor_confidence: governorVerdict.confidence_score,
+          governor_rationale: governorVerdict.governor_rationale,
+          required_validations: governorVerdict.required_validations,
+          failure_triggers: governorVerdict.failure_triggers,
+          monitoring_requirements: governorVerdict.monitoring_requirements,
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail || "Push to KorumOS failed.");
+      }
+      setPushResult(data);
+    } catch (err: any) {
+      setPushResult({
+        status: "error",
+        query_package: "",
+        detail: err.message || "Push to KorumOS failed — is the API running?",
+      });
+    } finally {
+      setIsPushing(false);
+    }
+  };
+
+  const handleCopyQueryPackage = async () => {
+    if (!pushResult?.query_package) return;
+    try {
+      await navigator.clipboard.writeText(pushResult.query_package);
+      setCopyConfirmed(true);
+      setTimeout(() => setCopyConfirmed(false), 2000);
+    } catch {
+      // Clipboard API can fail silently (e.g. permissions) — no-op is fine here.
     }
   };
 
@@ -732,9 +805,106 @@ export default function KorumLabDashboard() {
                       )}
 
                       {/* Rationale */}
-                      <div style={{ fontSize: '0.82rem', color: 'var(--k-text-muted)', lineHeight: 1.7, borderTop: '1px solid var(--k-border)', paddingTop: '0.75rem', fontStyle: 'italic' }}>
+                      <div style={{ fontSize: '0.82rem', color: 'var(--k-text-muted)', lineHeight: 1.7, borderTop: '1px solid var(--k-border)', paddingTop: '0.75rem', fontStyle: 'italic', marginBottom: '0.75rem' }}>
                         {governorVerdict.governor_rationale}
                       </div>
+
+                      {/* Push to KorumOS */}
+                      <button
+                        className="korum-button"
+                        style={{ width: '100%' }}
+                        onClick={handlePushToKorum}
+                        disabled={isPushing}
+                      >
+                        {isPushing ? (
+                          <><Activity size={14} style={{ animation: 'pulse 1s infinite' }} /> Pushing to KorumOS...</>
+                        ) : (
+                          <><Send size={14} /> Push to KorumOS</>
+                        )}
+                      </button>
+
+                      {pushResult && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 6 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          style={{ marginTop: '0.75rem', padding: '1rem', borderRadius: '8px',
+                            backgroundColor: pushResult.status === 'submitted' ? 'rgba(43,147,72,0.06)' : pushResult.status === 'error' ? 'rgba(201,74,74,0.06)' : 'rgba(212,175,55,0.05)',
+                            border: `1px solid ${pushResult.status === 'submitted' ? 'var(--k-success)' : pushResult.status === 'error' ? 'var(--k-danger)' : 'rgba(212,175,55,0.3)'}` }}
+                        >
+                          {pushResult.status === 'submitted' && (
+                            <>
+                              <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'var(--k-success)', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <CheckCircle2 size={11} /> Submitted to KorumOS Neural Council
+                              </div>
+                              <div style={{ fontSize: '0.85rem', color: 'var(--k-text-main)' }}>
+                                Job ID: <strong>{pushResult.job_id || 'pending'}</strong>
+                              </div>
+                              {pushResult.poll_url && (
+                                <div style={{ fontSize: '0.8rem', color: 'var(--k-text-muted)', marginTop: '0.25rem' }}>
+                                  Poll: {pushResult.poll_url}
+                                </div>
+                              )}
+                            </>
+                          )}
+
+                          {pushResult.status === 'manual_required' && (
+                            <>
+                              <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'var(--k-accent)', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <Info size={11} /> Manual Submission Required
+                              </div>
+                              <div style={{ fontSize: '0.82rem', color: 'var(--k-text-muted)', marginBottom: '0.75rem' }}>
+                                {pushResult.message || 'KORUMOS_API_KEY not configured. Copy the query package and paste it into KorumOS.'}
+                              </div>
+                              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                                <button
+                                  className="korum-button secondary"
+                                  style={{ flex: 1 }}
+                                  onClick={handleCopyQueryPackage}
+                                >
+                                  <Copy size={13} /> {copyConfirmed ? 'Copied!' : 'Copy Query Package'}
+                                </button>
+                                <a
+                                  href={pushResult.korumos_url || 'https://korum-os.com'}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="korum-button secondary"
+                                  style={{ flex: 1, textDecoration: 'none', textAlign: 'center', justifyContent: 'center' }}
+                                >
+                                  <ExternalLink size={13} /> Open KorumOS
+                                </a>
+                              </div>
+                              <pre style={{ marginTop: '0.75rem', maxHeight: '160px', overflowY: 'auto', fontSize: '0.72rem', color: 'var(--k-text-muted)', whiteSpace: 'pre-wrap', background: 'rgba(0,0,0,0.25)', padding: '0.75rem', borderRadius: '6px', border: '1px solid var(--k-border)' }}>
+                                {pushResult.query_package}
+                              </pre>
+                            </>
+                          )}
+
+                          {pushResult.status === 'error' && (
+                            <>
+                              <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'var(--k-danger)', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <AlertCircle size={11} /> Push Failed
+                              </div>
+                              <div style={{ fontSize: '0.82rem', color: 'var(--k-text-muted)' }}>
+                                {pushResult.detail || 'Unknown error.'}
+                              </div>
+                              {pushResult.query_package && (
+                                <>
+                                  <button
+                                    className="korum-button secondary"
+                                    style={{ marginTop: '0.5rem' }}
+                                    onClick={handleCopyQueryPackage}
+                                  >
+                                    <Copy size={13} /> {copyConfirmed ? 'Copied!' : 'Copy Query Package Anyway'}
+                                  </button>
+                                  <pre style={{ marginTop: '0.75rem', maxHeight: '160px', overflowY: 'auto', fontSize: '0.72rem', color: 'var(--k-text-muted)', whiteSpace: 'pre-wrap', background: 'rgba(0,0,0,0.25)', padding: '0.75rem', borderRadius: '6px', border: '1px solid var(--k-border)' }}>
+                                    {pushResult.query_package}
+                                  </pre>
+                                </>
+                              )}
+                            </>
+                          )}
+                        </motion.div>
+                      )}
                     </motion.div>
                   )}
 
