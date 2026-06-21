@@ -2,7 +2,7 @@ from openai import OpenAI
 from typing import List
 
 from korum_lab.models.extraction import ExtractedDecision
-from korum_lab.models.governor import GovernorVerdict
+from korum_lab.models.governor import GovernorVerdict, RiskClassificationReport
 from korum_lab.models.blueprint import BuildBlueprint
 from korum_lab.models.escalation import EscalationAnalysis
 
@@ -64,9 +64,58 @@ def run_adversarial_rebuttal(decision_summary: str) -> str:
 
 
 # --- Governor Resolution: GPT-4o (structured arbitration) ---
+def classify_red_team_findings(
+    original_summary: str,
+    red_team_attack: str,
+) -> RiskClassificationReport:
+    """
+    Classifies Red Team findings before Governor arbitration so generic
+    security/scale/privacy/performance cautions become conditions unless a
+    specific new blocking failure mode is demonstrated.
+    """
+    client = OpenAI()
+    response = client.beta.chat.completions.parse(
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You classify Red Team findings for a governed decision pipeline. "
+                    "For each material Red Team finding, assign exactly one category: "
+                    "CORE THESIS ATTACK, BLOCKING RISK, IMPLEMENTATION CONDITION, "
+                    "MONITORING REQUIREMENT, or GENERIC CAUTION.\n\n"
+                    "Security concerns are BLOCKING RISK only if they identify one of: "
+                    "1. new sensitive data exposure, 2. new external access, "
+                    "3. privilege escalation, 4. cross-tenant leakage, "
+                    "5. regulatory/legal violation, or 6. missing required control for "
+                    "the proposed action. Otherwise classify the concern as an "
+                    "IMPLEMENTATION CONDITION, MONITORING REQUIREMENT, or GENERIC CAUTION.\n\n"
+                    "Anti-overkill rule: Do not reject a proposal for generic security, "
+                    "scale, privacy, or performance risks if the proposal already limits "
+                    "scope and provides a reasonable control path. Convert those into "
+                    "conditions unless a specific failure mode is demonstrated.\n\n"
+                    "Example: 'RBAC may not be enough' is not a blocker by itself. "
+                    "Classify it as IMPLEMENTATION CONDITION with condition: "
+                    "'Verify existing RBAC applies to the relevant collection.'"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"ORIGINAL DECISION:\n{original_summary}\n\n"
+                    f"RED TEAM FINDINGS:\n{red_team_attack}"
+                ),
+            },
+        ],
+        response_format=RiskClassificationReport,
+    )
+    return response.choices[0].message.parsed
+
+
 def run_governor_resolution(
     original_summary: str,
     red_team_attack: str,
+    risk_classification_summary: str = "",
 ) -> GovernorVerdict:
     """
     Arbitrates between the primary extraction and the Red Team attack.
@@ -87,20 +136,25 @@ def run_governor_resolution(
                     "RULES:\n"
                     "- Evaluate each Red Team criticism on merit. Dismiss attacks that are speculative or redundant.\n"
                     "- Identify only NET-NEW risks: risks the original analysis did not surface.\n"
-                    "- If a net-new risk is critical (could reverse the outcome), it MUST appear in critical_unresolved_risks.\n"
+                    "- If a net-new risk is critical (could reverse the outcome), it MUST be classified as BLOCKING RISK with specific evidence before it appears in critical_unresolved_risks.\n"
                     "- Adjust confidence DOWN if the Red Team exposed real gaps. Adjust DOWN significantly if assumptions are invalidated.\n"
                     "- GO = decision holds, risks are manageable, proceed.\n"
-                    "- NO-GO = critical assumption invalidated or evidence base is too weak to act.\n"
+                    "- NO-GO = at least one evidenced BLOCKING RISK makes the core action unsafe or invalid.\n"
                     "- CONDITIONAL = decision could hold but only after specific validations are completed.\n"
                     "- required_validations must be concrete and actionable — not vague ('verify assumptions').\n"
                     "- governor_rationale must explain the ruling in one paragraph. Be direct.\n\n"
+                    "RISK CLASSIFICATION ENFORCEMENT:\n"
+                    "- You receive a pre-Governor risk classification. You may only issue NO-GO if it contains at least one BLOCKING RISK with evidence.\n"
+                    "- Security concerns are blockers only if they identify new sensitive data exposure, new external access, privilege escalation, cross-tenant leakage, regulatory/legal violation, or a missing required control for the proposed action.\n"
+                    "- Otherwise classify security concerns as implementation conditions, not rejection risks.\n"
+                    "- Do not reject a proposal for generic security, scale, privacy, or performance risks if the proposal already limits scope and provides a reasonable control path. Convert those into conditions unless a specific failure mode is demonstrated.\n\n"
                     "ADDITIONAL OUTPUT FIELDS:\n"
                     "- decision_conditions: The must-pass conditions for this decision. If any condition is unmet, execution is blocked. Be specific.\n"
                     "- failure_triggers: Concrete events or findings that would immediately invalidate this decision after it is issued. Not risks — triggers. Things that, if observed, mean the decision must be reversed or halted.\n"
                     "- monitoring_requirements: What must be actively tracked in real time during and after execution. Operational signals, not audit items.\n\n"
                     "ENFORCEMENT MANDATE:\n"
                     "You MUST output a final_decision of GO, NO-GO, or CONDITIONAL. No exceptions.\n"
-                    "Failure to commit is a system failure. If evidence is insufficient, default to CONDITIONAL or NO-GO — never leave it unresolved.\n"
+                    "Failure to commit is a system failure. If evidence is insufficient but no evidenced BLOCKING RISK exists, default to CONDITIONAL — never leave it unresolved.\n"
                     "Do NOT average the two positions. Do NOT seek artificial balance. Enforce the strongest defensible decision."
                 ),
             },
@@ -108,7 +162,8 @@ def run_governor_resolution(
                 "role": "user",
                 "content": (
                     f"ORIGINAL DECISION:\n{original_summary}\n\n"
-                    f"RED TEAM ATTACK:\n{red_team_attack}"
+                    f"RED TEAM ATTACK:\n{red_team_attack}\n\n"
+                    f"PRE-GOVERNOR RISK CLASSIFICATION:\n{risk_classification_summary or 'No structured risk classification available.'}"
                 ),
             },
         ],

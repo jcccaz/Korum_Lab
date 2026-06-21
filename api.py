@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from korum_lab.extractor import (
+    classify_red_team_findings,
     extract_structured_data,
     generate_escalation_reasons,
     run_adversarial_rebuttal,
@@ -510,6 +511,115 @@ class GovernorRequest(BaseModel):
     red_team_attack: str
 
 
+def _fallback_risk_classification(original_summary: str, red_team_attack: str) -> dict:
+    """Deterministic safety net if the classifier LLM is unavailable."""
+    combined = f"{original_summary}\n{red_team_attack}".lower()
+    finding = " ".join(red_team_attack.split())[:500] or "Red Team finding requires review"
+    blocker_terms = [
+        "sensitive data exposure",
+        "pii",
+        "api key",
+        "customer data",
+        "personal data",
+        "credential",
+        "secret",
+        "external access",
+        "privilege escalation",
+        "cross-tenant",
+        "regulatory violation",
+        "legal violation",
+        "missing required control",
+        "missing control",
+    ]
+    monitoring_terms = [
+        "performance",
+        "storage",
+        "latency",
+        "collection size",
+        "search latency",
+    ]
+    generic_condition_terms = [
+        "rbac",
+        "security",
+        "privacy",
+        "scale",
+        "may not be enough",
+        "might not be enough",
+    ]
+
+    if any(term in combined for term in blocker_terms):
+        category = "BLOCKING RISK"
+        evidence = "Red Team finding names a specific blocker category that requires proof before proceeding."
+        condition = ""
+    elif any(term in combined for term in monitoring_terms):
+        category = "MONITORING REQUIREMENT"
+        evidence = ""
+        condition = "Monitor collection size/search latency for 30 days."
+    elif any(term in combined for term in generic_condition_terms):
+        category = "IMPLEMENTATION CONDITION"
+        evidence = ""
+        if "rbac" in combined and "foundry_builds" in combined:
+            condition = "Verify existing RBAC applies to foundry_builds collection."
+        else:
+            condition = "Validate the named control path before production execution."
+    else:
+        category = "GENERIC CAUTION"
+        evidence = ""
+        condition = "Track this caution during implementation review."
+
+    return {
+        "findings": [
+            {
+                "finding": finding,
+                "category": category,
+                "evidence": evidence,
+                "condition": condition,
+            }
+        ]
+    }
+
+
+def _risk_classification_has_blocker(report: dict) -> bool:
+    return any(
+        finding.get("category") == "BLOCKING RISK" and str(finding.get("evidence") or "").strip()
+        for finding in report.get("findings", [])
+    )
+
+
+def _risk_classification_summary(report: dict) -> str:
+    lines = []
+    for finding in report.get("findings", []):
+        lines.append(
+            "- {category}: {finding} | evidence: {evidence} | condition: {condition}".format(
+                category=finding.get("category", "GENERIC CAUTION"),
+                finding=finding.get("finding", ""),
+                evidence=finding.get("evidence", "") or "none",
+                condition=finding.get("condition", "") or "none",
+            )
+        )
+    return "\n".join(lines)
+
+
+def _conditions_from_risk_classification(report: dict) -> List[str]:
+    conditions = []
+    for finding in report.get("findings", []):
+        if finding.get("category") == "IMPLEMENTATION CONDITION":
+            condition = str(finding.get("condition") or "").strip()
+            if condition and condition not in conditions:
+                conditions.append(condition)
+    return conditions
+
+
+def _monitoring_from_risk_classification(report: dict) -> List[str]:
+    requirements = []
+    for finding in report.get("findings", []):
+        if finding.get("category") == "MONITORING REQUIREMENT":
+            condition = str(finding.get("condition") or "").strip()
+            if condition and condition not in requirements:
+                requirements.append(condition)
+    return requirements
+
+
 @app.post("/api/governor")
 async def governor_resolution(req: GovernorRequest):
     """
@@ -537,21 +647,58 @@ async def governor_resolution(req: GovernorRequest):
         if "MISSING EVIDENCE" in attack_upper or "NO EVIDENCE" in attack_upper:
             rule_flags.append("Red Team cited missing or absent evidence")
 
+        try:
+            risk_classification = classify_red_team_findings(
+                req.original_summary,
+                req.red_team_attack,
+            ).model_dump()
+        except Exception:
+            risk_classification = _fallback_risk_classification(
+                req.original_summary,
+                req.red_team_attack,
+            )
+            rule_flags.append("Risk classifier fallback used")
+
+        has_blocking_risk = _risk_classification_has_blocker(risk_classification)
+        implementation_conditions = _conditions_from_risk_classification(risk_classification)
+        monitoring_requirements = _monitoring_from_risk_classification(risk_classification)
+
         # ── STEP 2: Model Resolution (LLM arbitration) ────────────────────────
-        verdict = run_governor_resolution(req.original_summary, req.red_team_attack)
+        verdict = run_governor_resolution(
+            req.original_summary,
+            req.red_team_attack,
+            _risk_classification_summary(risk_classification),
+        )
         data = verdict.model_dump()
+        data["risk_classification"] = risk_classification
+
+        for condition in implementation_conditions:
+            if condition not in data["required_validations"]:
+                data["required_validations"].append(condition)
+            if condition not in data["decision_conditions"]:
+                data["decision_conditions"].append(condition)
+        for requirement in monitoring_requirements:
+            if requirement not in data["monitoring_requirements"]:
+                data["monitoring_requirements"].append(requirement)
 
         # ── STEP 3: Final Enforcement (hard caps / overrides) ─────────────────
-        # Hard floor: if LLM confidence is critically low, force NO-GO
+        # Hard floor: if confidence is critically low, block only with an
+        # evidenced blocking risk; otherwise require conditional validation.
         if data["confidence_score"] < 30:
-            data["final_decision"] = "NO-GO"
-            data["critical_unresolved_risks"].append(
-                "Confidence below minimum execution threshold (30) — proceed is blocked"
-            )
+            if has_blocking_risk:
+                data["final_decision"] = "NO-GO"
+                data["critical_unresolved_risks"].append(
+                    "Confidence below minimum execution threshold (30) with evidenced blocking risk — proceed is blocked"
+                )
+            else:
+                data["final_decision"] = "CONDITIONAL"
+                data["required_validations"].append(
+                    "Confidence below minimum execution threshold (30) — validate implementation controls before execution"
+                )
 
         # Confidence cap: Red Team REJECT + unresolved risks → cap at 60
         red_team_rejected = "REJECT" in req.red_team_attack.upper()
-        has_unresolved = bool(data.get("critical_unresolved_risks"))
+        has_unresolved = bool(data.get("critical_unresolved_risks")) and has_blocking_risk
         if red_team_rejected and has_unresolved and data["confidence_score"] > 60:
             data["confidence_score"] = 60
             rule_flags.append(
@@ -569,6 +716,21 @@ async def governor_resolution(req: GovernorRequest):
                 "Overridden GO → CONDITIONAL: Red Team sustained with unresolved critical risks"
             )
 
+        # NO-GO is reserved for evidenced blocking risks. Generic security,
+        # scale, privacy, or performance cautions become implementation
+        # conditions when a reasonable control path exists.
+        if data["final_decision"] == "NO-GO" and not has_blocking_risk:
+            data["final_decision"] = "CONDITIONAL"
+            for risk in data.get("critical_unresolved_risks", []):
+                validation = f"Validate before execution: {risk}"
+                if validation not in data["required_validations"]:
+                    data["required_validations"].append(validation)
+            data["critical_unresolved_risks"] = []
+            has_unresolved = False
+            rule_flags.append(
+                "Overridden NO-GO → CONDITIONAL: no evidenced BLOCKING RISK in pre-Governor classification"
+            )
+
         # Enforce: CONDITIONAL must always have required_validations
         if data["final_decision"] == "CONDITIONAL" and not data["required_validations"]:
             data["required_validations"].append(
@@ -577,10 +739,11 @@ async def governor_resolution(req: GovernorRequest):
 
         # Hard fallback: final_decision must ALWAYS be set — never leave it empty
         if data.get("final_decision") not in ("GO", "NO-GO", "CONDITIONAL"):
-            data["final_decision"] = "NO-GO"
-            rule_flags.append("Hard fallback enforced: Governor returned no valid verdict — defaulted to NO-GO")
+            data["final_decision"] = "NO-GO" if has_blocking_risk else "CONDITIONAL"
+            rule_flags.append(f"Hard fallback enforced: Governor returned no valid verdict — defaulted to {data['final_decision']}")
 
         # Decision status lifecycle (human-readable, maps to final_decision + context)
+        has_unresolved = bool(data.get("critical_unresolved_risks")) and has_blocking_risk
         fd = data["final_decision"]
         rt = data["red_team_verdict"]
         score = data["confidence_score"]

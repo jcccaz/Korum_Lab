@@ -2,6 +2,36 @@ from pydantic import BaseModel, Field
 from typing import List, Literal
 
 
+RiskCategory = Literal[
+    "CORE THESIS ATTACK",
+    "BLOCKING RISK",
+    "IMPLEMENTATION CONDITION",
+    "MONITORING REQUIREMENT",
+    "GENERIC CAUTION",
+]
+
+
+class ClassifiedRiskFinding(BaseModel):
+    finding: str = Field(
+        description="The Red Team finding being classified, written as a concise natural sentence."
+    )
+    category: RiskCategory = Field(
+        description="Risk class used by the Governor before final arbitration."
+    )
+    evidence: str = Field(
+        description="Specific evidence or failure mode supporting the category. Empty only for generic cautions."
+    )
+    condition: str = Field(
+        description="Implementation condition or monitoring requirement if the finding is not a blocker."
+    )
+
+
+class RiskClassificationReport(BaseModel):
+    findings: List[ClassifiedRiskFinding] = Field(
+        description="One classified item per material Red Team finding."
+    )
+
+
 class GovernorVerdict(BaseModel):
     final_decision: Literal["GO", "NO-GO", "CONDITIONAL"] = Field(
         description="Final ruling after weighing primary analysis against Red Team attack"
