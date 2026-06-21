@@ -2,6 +2,7 @@ from openai import OpenAI
 
 from korum_lab.models.extraction import ExtractedDecision
 from korum_lab.models.governor import GovernorVerdict
+from korum_lab.models.blueprint import BuildBlueprint
 
 # --- Primary extraction: OpenAI gpt-4o (structured output, precision) ---
 def extract_structured_data(text: str) -> ExtractedDecision:
@@ -110,5 +111,68 @@ def run_governor_resolution(
             },
         ],
         response_format=GovernorVerdict,
+    )
+    return response.choices[0].message.parsed
+
+
+# --- Foundry Workshop Build: GPT-4o (structured planning, NOT code generation) ---
+def run_blueprint_generation(concept_lock_summary: str) -> BuildBlueprint:
+    """
+    Forge MVP — Build Blueprint Generator.
+
+    Takes a locked Concept Lock (an approved, governed decision) and answers
+    "How would we build this?" — NOT "generate the application." This is
+    intentionally scoped down from the full Forge vision: no code synthesis,
+    no repo generation, no deployment plan. Just the planning artifacts a
+    human (or a future, fuller Forge) would need before writing a line of
+    code: a product brief, an architecture narrative, a conceptual data
+    model, required components, dependencies, ordered build phases, and the
+    validation gates between them.
+
+    This exists to test one specific handoff — can an approved Concept Lock
+    reliably become an actionable implementation blueprint? — before
+    building anything bigger.
+    """
+    client = OpenAI()
+    response = client.beta.chat.completions.parse(
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are Forge's Build Blueprint Generator — the first stage of Foundry "
+                    "Workshop Build. You receive an approved, governed Concept Lock (a frozen "
+                    "institutional decision pattern, already through Council and Governor "
+                    "review) and must answer ONE question: How would we build this?\n\n"
+                    "HARD BOUNDARIES — violating any of these is a failure:\n"
+                    "- Do NOT write code. No snippets, no pseudocode, no file contents.\n"
+                    "- Do NOT generate a repository structure, file tree, or scaffold.\n"
+                    "- Do NOT produce a deployment plan or CI/CD steps.\n"
+                    "- Do NOT answer 'generate the application' — you are answering 'how would "
+                    "we build this', which is a planning question, not a construction one.\n\n"
+                    "WHAT TO DO INSTEAD:\n"
+                    "- product_brief: ground this in the Concept Lock's actual Core Thesis and "
+                    "Recommendations — not a generic pitch.\n"
+                    "- architecture_blueprint: describe the major pieces and how they relate, "
+                    "in prose. A reader should understand the shape of the system, not its code.\n"
+                    "- data_model: name the key entities/structures conceptually — not SQL/Cypher.\n"
+                    "- required_components: name services/modules/pieces that must exist.\n"
+                    "- dependencies: external libraries, APIs, infrastructure, other KORUM "
+                    "systems (e.g. ANCHOR, Watchtower) this would need to integrate with.\n"
+                    "- build_phases: an ORDERED sequence — sequence matters, don't just list "
+                    "everything as parallel work.\n"
+                    "- validation_gates: what must pass before moving to the next phase. Pull "
+                    "from the Concept Lock's Governance Conditions where relevant, but make "
+                    "these specific to the build itself, not just a restatement of them.\n\n"
+                    "If the Concept Lock doesn't give you enough to answer a field with "
+                    "confidence, say so explicitly in that field rather than inventing detail."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"CONCEPT LOCK:\n\n{concept_lock_summary}",
+            },
+        ],
+        response_format=BuildBlueprint,
     )
     return response.choices[0].message.parsed

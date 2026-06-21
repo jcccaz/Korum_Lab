@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Database, Brain, ShieldAlert, FileText, Network, Search, Activity, Terminal, CheckCircle2, ChevronRight, AlertTriangle, AlertCircle, Cpu, FileCheck, Target, Info, RotateCcw, TrendingUp, TrendingDown, Minus, Scale, ListChecks, XCircle, Send, Copy, ExternalLink } from "lucide-react";
+import { Database, Brain, ShieldAlert, FileText, Network, Search, Activity, Terminal, CheckCircle2, ChevronRight, AlertTriangle, AlertCircle, Cpu, FileCheck, Target, Info, RotateCcw, TrendingUp, TrendingDown, Minus, Scale, ListChecks, XCircle, Send, Copy, ExternalLink, History, Anchor } from "lucide-react";
 import "./KorumDashboard.css";
 
 const starterText = `Project FrankNet:\nWe are deciding whether to replace a failing router or reroute traffic.\nPacket loss has increased 25%.\nTechnicians report intermittent outages.`;
@@ -74,6 +74,91 @@ interface PushToKorumResult {
   detail?: string;
 }
 
+// --- Send-to-ANCHOR Response Shape (mirrors api.py's /api/push-to-anchor) ---
+interface PushToAnchorResult {
+  status: "manual_required" | "ingested" | "duplicate" | "submitted" | "error";
+  message?: string;
+  query_package: string;
+  anchor_url?: string;
+  http_status?: number;
+  detail?: string;
+}
+
+// --- Concept Lock Shape (mirrors api.py's /api/concept-lock) ---
+// Per the KORUM Concept Lock Workflow: this is the frozen, reusable
+// institutional pattern — not the raw decision. This is what goes to ANCHOR.
+//
+// Governance Conditions stay split into four subfields — they answer
+// different questions for different downstream consumers (approval gate,
+// pre-execution gate for Foundry Build, reversal trigger, ongoing
+// Watchtower hook) and flattening them would erase that distinction.
+interface GovernanceConditions {
+  decision_conditions: string[];
+  required_validations: string[];
+  failure_triggers: string[];
+  monitoring_requirements: string[];
+}
+
+interface ConceptLock {
+  id: string | null;
+  decision_id: string | null;
+  status: "LOCKED" | "CONDITIONAL_LOCK";
+  core_thesis: string;
+  supporting_assumptions: string[];
+  risks: string[];
+  recommendations: string[];
+  open_unknowns: string[];
+  governance_conditions: GovernanceConditions;
+  graph_status: string;
+}
+
+// --- Blueprint Preview Shape (mirrors api.py's /api/concept-lock/{id}/preview-blueprint) ---
+// Test-harness preview only — a single LLM sanity-check of a Concept Lock.
+// NOT Foundry's real Forge: no council seats, no phased build, no Construction
+// Documents, no Send to Coder. Planning artifacts only — no code/repo/deploy.
+interface BuildBlueprint {
+  id: string | null;
+  lock_id: string | null;
+  status: string;
+  is_preview: boolean;
+  note: string;
+  product_brief: string;
+  architecture_blueprint: string;
+  data_model: string[];
+  required_components: string[];
+  dependencies: string[];
+  build_phases: string[];
+  validation_gates: string[];
+  graph_status: string;
+}
+
+// --- History List Item (mirrors korum_lab/graph/queries.py's query_list_decisions) ---
+interface DecisionHistoryItem {
+  id: string;
+  decision_context: string;
+  project: string | null;
+  confidence_score: number | null;
+  governance_status: string | null;
+  created_at: string;
+}
+
+// --- History Detail (mirrors query_decision_by_id) ---
+interface DecisionDetail {
+  id: string;
+  decision_context: string;
+  project: string | null;
+  confidence_score: number | null;
+  governance_status: string | null;
+  created_at: string | null;
+  evidence: string[];
+  assumptions: string[];
+  unknowns: string[];
+  risks: string[];
+  recommendation: string | null;
+  strategy_decision_type: string | null;
+  strategy_objective: string | null;
+}
+
 // --- API Response Shape ---
 interface ExtractResult {
   project: string;
@@ -91,6 +176,7 @@ interface ExtractResult {
   rebuttal_applied: boolean;
   score_delta: number | null;
   graph_injection_status?: string;
+  decision_id?: string | null;
 }
 
 export default function KorumLabDashboard() {
@@ -108,6 +194,86 @@ export default function KorumLabDashboard() {
   const [isPushing, setIsPushing] = useState(false);
   const [pushResult, setPushResult] = useState<PushToKorumResult | null>(null);
   const [copyConfirmed, setCopyConfirmed] = useState(false);
+  const [isSendingToAnchor, setIsSendingToAnchor] = useState(false);
+  const [anchorResult, setAnchorResult] = useState<PushToAnchorResult | null>(null);
+  const [conceptLock, setConceptLock] = useState<ConceptLock | null>(null);
+  const [isLocking, setIsLocking] = useState(false);
+  const [lockError, setLockError] = useState<string | null>(null);
+  const [buildBlueprint, setBuildBlueprint] = useState<BuildBlueprint | null>(null);
+  const [isGeneratingBlueprint, setIsGeneratingBlueprint] = useState(false);
+  const [blueprintError, setBlueprintError] = useState<string | null>(null);
+  const [history, setHistory] = useState<DecisionHistoryItem[]>([]);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [loadingDecisionId, setLoadingDecisionId] = useState<string | null>(null);
+
+  const fetchHistory = async () => {
+    setIsLoadingHistory(true);
+    setHistoryError(null);
+    try {
+      const response = await fetch("http://127.0.0.1:8000/api/decisions?limit=50");
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Failed to load history");
+      setHistory(data);
+    } catch (err: any) {
+      setHistoryError(err.message || "History unavailable — is Neo4j running?");
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  };
+
+  // Pull the list once on load so the panel isn't empty the first time it's opened.
+  useEffect(() => {
+    fetchHistory();
+  }, []);
+
+  const handleLoadDecision = async (decisionId: string) => {
+    setLoadingDecisionId(decisionId);
+    setErrorMsg(null);
+    try {
+      const response = await fetch(`http://127.0.0.1:8000/api/decisions/${decisionId}`);
+      const data: DecisionDetail = await response.json();
+      if (!response.ok) throw new Error((data as any).detail || "Failed to load decision");
+
+      // Neo4j only persists the extraction + governor fields below — it does not
+      // store rebuttal/red-team state, so this is a faithful restore of what's
+      // actually in the graph, not a full replay of that original session.
+      setResult({
+        project: data.project || "",
+        decision_context: data.decision_context || "",
+        evidence: data.evidence || [],
+        assumptions: data.assumptions || [],
+        risks: data.risks || [],
+        unknowns: data.unknowns || [],
+        recommendation: data.recommendation || "",
+        confidence_score: data.confidence_score ?? 0,
+        governance_status: data.governance_status || "RESTORED FROM HISTORY",
+        status_color: (data.confidence_score ?? 0) >= 80 ? "success" : (data.confidence_score ?? 0) >= 50 ? "warning" : "ruby-base",
+        governance_reason: [],
+        strategy_applied: data.strategy_decision_type
+          ? { decision_type: data.strategy_decision_type, objective: data.strategy_objective || "" }
+          : null,
+        rebuttal_applied: false,
+        score_delta: null,
+        graph_injection_status: `Loaded from history (${data.created_at || "unknown date"})`,
+        decision_id: data.id,
+      });
+      setRedTeamOutput(null);
+      setGovernorVerdict(null);
+      setPushResult(null);
+      setAnchorResult(null);
+      setConceptLock(null);
+      setLockError(null);
+      setBuildBlueprint(null);
+      setBlueprintError(null);
+      setIsHistoryOpen(false);
+    } catch (err: any) {
+      setErrorMsg(err.message || "Failed to load that decision from history.");
+    } finally {
+      setLoadingDecisionId(null);
+    }
+  };
 
   const handleExtract = async () => {
     setIsProcessing(true);
@@ -130,6 +296,7 @@ export default function KorumLabDashboard() {
       }
 
       setResult(data);
+      fetchHistory(); // New decision just landed in Neo4j — refresh the list so it's there immediately.
     } catch (err: any) {
       setErrorMsg(err.message || "Engine API offline or unreachable.");
     } finally {
@@ -145,6 +312,11 @@ export default function KorumLabDashboard() {
     setRedTeamOutput(null);
     setGovernorVerdict(null);
     setPushResult(null);
+    setAnchorResult(null);
+    setConceptLock(null);
+    setLockError(null);
+    setBuildBlueprint(null);
+    setBlueprintError(null);
     setCopyConfirmed(false);
   };
 
@@ -185,6 +357,10 @@ export default function KorumLabDashboard() {
     if (!result || !redTeamOutput) return;
     setIsResolving(true);
     setGovernorVerdict(null);
+    setConceptLock(null); // A fresh verdict invalidates any earlier lock — re-lock against the new ruling.
+    setLockError(null);
+    setBuildBlueprint(null); // ...and any blueprint generated from the old lock goes with it.
+    setBlueprintError(null);
 
     const summary = [
       `Project: ${result.project}`,
@@ -256,10 +432,127 @@ export default function KorumLabDashboard() {
     }
   };
 
+  const handleLockConcept = async () => {
+    if (!result || !governorVerdict) return;
+    setIsLocking(true);
+    setLockError(null);
+
+    try {
+      const response = await fetch("http://127.0.0.1:8000/api/concept-lock", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project: result.project,
+          decision_context: result.decision_context,
+          recommendation: result.recommendation,
+          assumptions: result.assumptions,
+          risks: result.risks,
+          unknowns: result.unknowns,
+          final_decision: governorVerdict.final_decision,
+          confidence_score: governorVerdict.confidence_score,
+          governor_rationale: governorVerdict.governor_rationale,
+          new_risks_identified: governorVerdict.new_risks_identified,
+          decision_conditions: governorVerdict.decision_conditions,
+          required_validations: governorVerdict.required_validations,
+          failure_triggers: governorVerdict.failure_triggers,
+          monitoring_requirements: governorVerdict.monitoring_requirements,
+          decision_id: result.decision_id,
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail || "Lock Concept failed.");
+      }
+      setConceptLock(data);
+      setAnchorResult(null); // Any previous send was for a different (or no) lock — clear it.
+      setBuildBlueprint(null); // Same for any blueprint generated from a previous lock.
+      setBlueprintError(null);
+    } catch (err: any) {
+      setLockError(err.message || "Lock Concept failed — is the API running?");
+    } finally {
+      setIsLocking(false);
+    }
+  };
+
+  const handleSendToAnchor = async () => {
+    if (!conceptLock) return;
+    setIsSendingToAnchor(true);
+    setAnchorResult(null);
+
+    try {
+      const response = await fetch("http://127.0.0.1:8000/api/push-to-anchor", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project: result?.project || "",
+          core_thesis: conceptLock.core_thesis,
+          supporting_assumptions: conceptLock.supporting_assumptions,
+          risks: conceptLock.risks,
+          recommendations: conceptLock.recommendations,
+          open_unknowns: conceptLock.open_unknowns,
+          governance_conditions: conceptLock.governance_conditions,
+          status: conceptLock.status,
+          lock_id: conceptLock.id,
+          decision_id: conceptLock.decision_id,
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail || "Send to ANCHOR failed.");
+      }
+      setAnchorResult(data);
+    } catch (err: any) {
+      setAnchorResult({
+        status: "error",
+        query_package: "",
+        detail: err.message || "Send to ANCHOR failed — is anchor-runtime running?",
+      });
+    } finally {
+      setIsSendingToAnchor(false);
+    }
+  };
+
+  const handleGenerateBlueprint = async () => {
+    // Backend reads the lock fresh from Neo4j by id, so a persisted id is required.
+    if (!conceptLock?.id) return;
+    setIsGeneratingBlueprint(true);
+    setBlueprintError(null);
+
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:8000/api/concept-lock/${conceptLock.id}/preview-blueprint`,
+        { method: "POST" }
+      );
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail || "Generate Preview Blueprint failed.");
+      }
+      setBuildBlueprint(data);
+    } catch (err: any) {
+      setBlueprintError(err.message || "Generate Preview Blueprint failed — is the API running?");
+    } finally {
+      setIsGeneratingBlueprint(false);
+    }
+  };
+
   const handleCopyQueryPackage = async () => {
     if (!pushResult?.query_package) return;
     try {
       await navigator.clipboard.writeText(pushResult.query_package);
+      setCopyConfirmed(true);
+      setTimeout(() => setCopyConfirmed(false), 2000);
+    } catch {
+      // Clipboard API can fail silently (e.g. permissions) — no-op is fine here.
+    }
+  };
+
+  const handleCopyAnchorPackage = async () => {
+    if (!anchorResult?.query_package) return;
+    try {
+      await navigator.clipboard.writeText(anchorResult.query_package);
       setCopyConfirmed(true);
       setTimeout(() => setCopyConfirmed(false), 2000);
     } catch {
@@ -329,15 +622,79 @@ export default function KorumLabDashboard() {
   return (
     <div className="korum-dashboard-container">
       {/* Header */}
-      <header className="korum-header">
+      <header className="korum-header" style={{ position: 'relative' }}>
         <div className="korum-logo">
           <Terminal className="icon" size={28} />
           <span>Korum Lab Console</span>
         </div>
-        <div className="korum-status">
-          <div className="korum-status-dot"></div>
-          Decision Engine Online
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          <button
+            className="korum-button secondary"
+            style={{ padding: '0.5rem 0.9rem' }}
+            onClick={() => setIsHistoryOpen((open) => !open)}
+          >
+            <History size={14} /> History {history.length > 0 && `(${history.length})`}
+          </button>
+          <div className="korum-status">
+            <div className="korum-status-dot"></div>
+            Decision Engine Online
+          </div>
         </div>
+
+        {isHistoryOpen && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            style={{
+              position: 'absolute', top: '100%', right: '1.5rem', marginTop: '0.5rem',
+              width: '420px', maxHeight: '420px', overflowY: 'auto', zIndex: 50,
+              backgroundColor: 'var(--k-surface, #14141a)', border: '1px solid var(--k-border)',
+              borderRadius: '8px', boxShadow: '0 12px 32px rgba(0,0,0,0.5)', padding: '0.75rem',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+              <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--k-text-muted)' }}>
+                Past Decisions (from Neo4j)
+              </span>
+              <button className="korum-button secondary" style={{ padding: '0.25rem 0.6rem', fontSize: '0.75rem' }} onClick={fetchHistory} disabled={isLoadingHistory}>
+                {isLoadingHistory ? "..." : "Refresh"}
+              </button>
+            </div>
+
+            {historyError && (
+              <div style={{ fontSize: '0.8rem', color: 'var(--k-danger)', padding: '0.5rem 0' }}>{historyError}</div>
+            )}
+            {!historyError && !isLoadingHistory && history.length === 0 && (
+              <div style={{ fontSize: '0.8rem', color: 'var(--k-text-muted)', padding: '0.5rem 0' }}>No past decisions yet.</div>
+            )}
+
+            {history.map((item) => (
+              <button
+                key={item.id}
+                onClick={() => handleLoadDecision(item.id)}
+                disabled={loadingDecisionId === item.id}
+                style={{
+                  display: 'block', width: '100%', textAlign: 'left', background: 'rgba(255,255,255,0.02)',
+                  border: '1px solid var(--k-border)', borderRadius: '6px', padding: '0.6rem 0.75rem',
+                  marginBottom: '0.4rem', cursor: 'pointer', color: 'var(--k-text-main)',
+                }}
+              >
+                <div style={{ fontSize: '0.7rem', color: 'var(--k-accent)', marginBottom: '0.2rem' }}>
+                  {item.project || 'Unspecified'} · {item.id}
+                  {loadingDecisionId === item.id && " · loading..."}
+                </div>
+                <div style={{ fontSize: '0.82rem', lineHeight: 1.4 }}>
+                  {item.decision_context.length > 110 ? `${item.decision_context.slice(0, 110)}...` : item.decision_context}
+                </div>
+                {item.confidence_score !== null && (
+                  <div style={{ fontSize: '0.7rem', color: 'var(--k-text-muted)', marginTop: '0.3rem' }}>
+                    Confidence: {item.confidence_score} · {item.governance_status || 'Unknown status'}
+                  </div>
+                )}
+              </button>
+            ))}
+          </motion.div>
+        )}
       </header>
 
       {/* Main Grid */}
@@ -809,19 +1166,144 @@ export default function KorumLabDashboard() {
                         {governorVerdict.governor_rationale}
                       </div>
 
-                      {/* Push to KorumOS */}
-                      <button
-                        className="korum-button"
-                        style={{ width: '100%' }}
-                        onClick={handlePushToKorum}
-                        disabled={isPushing}
-                      >
-                        {isPushing ? (
-                          <><Activity size={14} style={{ animation: 'pulse 1s infinite' }} /> Pushing to KorumOS...</>
-                        ) : (
-                          <><Send size={14} /> Push to KorumOS</>
-                        )}
-                      </button>
+                      {/* Lock Concept — freezes this verdict into a reusable institutional pattern.
+                          A NO-GO is a dead end, not a pattern, so locking is disabled for it. */}
+                      {!conceptLock && (
+                        <>
+                          <button
+                            className="korum-button"
+                            style={{ width: '100%', backgroundColor: 'rgba(212,175,55,0.15)', color: 'var(--k-accent)', border: '1px solid rgba(212,175,55,0.5)', boxShadow: 'none' }}
+                            onClick={handleLockConcept}
+                            disabled={isLocking || governorVerdict.final_decision === 'NO-GO'}
+                            title={governorVerdict.final_decision === 'NO-GO' ? 'NO-GO decisions cannot be locked — they are not approved patterns.' : undefined}
+                          >
+                            {isLocking ? (
+                              <><Activity size={14} style={{ animation: 'pulse 1s infinite' }} /> Locking Concept...</>
+                            ) : (
+                              <><FileCheck size={14} /> {governorVerdict.final_decision === 'NO-GO' ? 'Cannot Lock (NO-GO)' : 'Lock Concept'}</>
+                            )}
+                          </button>
+                          {lockError && (
+                            <div style={{ marginTop: '0.5rem', fontSize: '0.8rem', color: 'var(--k-danger)' }}>{lockError}</div>
+                          )}
+                        </>
+                      )}
+
+                      {conceptLock && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 6 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          style={{ marginBottom: '0.75rem', padding: '1rem', borderRadius: '8px', backgroundColor: 'rgba(212,175,55,0.06)', border: '1px solid rgba(212,175,55,0.35)' }}
+                        >
+                          <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'var(--k-accent)', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <FileCheck size={11} /> Concept Lock — {conceptLock.status}
+                          </div>
+                          <div style={{ fontSize: '0.85rem', color: 'var(--k-text-main)', fontWeight: 600, marginBottom: '0.6rem' }}>
+                            {conceptLock.core_thesis}
+                          </div>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.6rem', fontSize: '0.78rem', color: 'var(--k-text-muted)' }}>
+                            <div><strong style={{ color: 'var(--k-text-main)' }}>Supporting Assumptions:</strong> {conceptLock.supporting_assumptions.length || 'None'}</div>
+                            <div><strong style={{ color: 'var(--k-text-main)' }}>Risks Accepted:</strong> {conceptLock.risks.length || 'None'}</div>
+                            <div><strong style={{ color: 'var(--k-text-main)' }}>Open Unknowns:</strong> {conceptLock.open_unknowns.length || 'None'}</div>
+                          </div>
+
+                          {/* Governance Conditions — kept as 4 distinct rows, not one combined count:
+                              each answers a different question for a different downstream consumer
+                              (approval gate / pre-execution gate / reversal trigger / Watchtower hook). */}
+                          <div style={{ marginTop: '0.6rem', paddingTop: '0.6rem', borderTop: '1px solid rgba(212,175,55,0.2)' }}>
+                            <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--k-accent)', marginBottom: '0.4rem' }}>
+                              Governance Conditions
+                            </div>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', fontSize: '0.78rem', color: 'var(--k-text-muted)' }}>
+                              <div><strong style={{ color: 'var(--k-text-main)' }}>Decision Conditions:</strong> {conceptLock.governance_conditions.decision_conditions.length || 'None'}</div>
+                              <div><strong style={{ color: 'var(--k-text-main)' }}>Required Validations:</strong> {conceptLock.governance_conditions.required_validations.length || 'None'}</div>
+                              <div><strong style={{ color: 'var(--k-text-main)' }}>Failure Triggers:</strong> {conceptLock.governance_conditions.failure_triggers.length || 'None'}</div>
+                              <div><strong style={{ color: 'var(--k-text-main)' }}>Monitoring Requirements:</strong> {conceptLock.governance_conditions.monitoring_requirements.length || 'None'}</div>
+                            </div>
+                          </div>
+
+                          <div style={{ fontSize: '0.72rem', color: 'var(--k-text-muted)', marginTop: '0.5rem' }}>{conceptLock.graph_status}</div>
+                        </motion.div>
+                      )}
+
+                      {/* Push to KorumOS / Send to Anchor */}
+                      <div style={{ display: 'flex', gap: '0.75rem' }}>
+                        <button
+                          className="korum-button"
+                          style={{ flex: 1 }}
+                          onClick={handlePushToKorum}
+                          disabled={isPushing}
+                        >
+                          {isPushing ? (
+                            <><Activity size={14} style={{ animation: 'pulse 1s infinite' }} /> Pushing to KorumOS...</>
+                          ) : (
+                            <><Send size={14} /> Push to KorumOS</>
+                          )}
+                        </button>
+                        <button
+                          className="korum-button"
+                          style={{ flex: 1, backgroundColor: 'rgba(94,154,255,0.12)', color: '#5e9aff', border: '1px solid rgba(94,154,255,0.4)', boxShadow: 'none' }}
+                          onClick={handleSendToAnchor}
+                          disabled={isSendingToAnchor || !conceptLock}
+                          title={!conceptLock ? 'Lock the concept first — ANCHOR stores approved patterns, not raw decisions.' : undefined}
+                        >
+                          {isSendingToAnchor ? (
+                            <><Activity size={14} style={{ animation: 'pulse 1s infinite' }} /> Sending to ANCHOR...</>
+                          ) : (
+                            <><Anchor size={14} /> Send to ANCHOR</>
+                          )}
+                        </button>
+                      </div>
+
+                      {anchorResult && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 6 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          style={{ marginTop: '0.75rem', padding: '1rem', borderRadius: '8px',
+                            backgroundColor: anchorResult.status === 'error' ? 'rgba(201,74,74,0.06)' : 'rgba(94,154,255,0.06)',
+                            border: `1px solid ${anchorResult.status === 'error' ? 'var(--k-danger)' : 'rgba(94,154,255,0.4)'}` }}
+                        >
+                          {(anchorResult.status === 'ingested' || anchorResult.status === 'submitted' || anchorResult.status === 'duplicate') && (
+                            <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.1em', color: '#5e9aff', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <CheckCircle2 size={11} />
+                              {anchorResult.status === 'duplicate' ? 'Already Archived in ANCHOR' : 'Archived to ANCHOR Memory'}
+                            </div>
+                          )}
+
+                          {anchorResult.status === 'manual_required' && (
+                            <>
+                              <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.1em', color: '#5e9aff', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <Info size={11} /> Manual Ingest Required
+                              </div>
+                              <div style={{ fontSize: '0.82rem', color: 'var(--k-text-muted)', marginBottom: '0.75rem' }}>
+                                {anchorResult.message || 'ANCHOR_API_KEY not configured. Copy the package and ingest it into ANCHOR manually.'}
+                              </div>
+                              <button className="korum-button secondary" onClick={handleCopyAnchorPackage}>
+                                <Copy size={13} /> {copyConfirmed ? 'Copied!' : 'Copy Package'}
+                              </button>
+                              <pre style={{ marginTop: '0.75rem', maxHeight: '160px', overflowY: 'auto', fontSize: '0.72rem', color: 'var(--k-text-muted)', whiteSpace: 'pre-wrap', background: 'rgba(0,0,0,0.25)', padding: '0.75rem', borderRadius: '6px', border: '1px solid var(--k-border)' }}>
+                                {anchorResult.query_package}
+                              </pre>
+                            </>
+                          )}
+
+                          {anchorResult.status === 'error' && (
+                            <>
+                              <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'var(--k-danger)', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <AlertCircle size={11} /> Send to ANCHOR Failed
+                              </div>
+                              <div style={{ fontSize: '0.82rem', color: 'var(--k-text-muted)' }}>
+                                {anchorResult.detail || 'Unknown error.'}
+                              </div>
+                              {anchorResult.query_package && (
+                                <button className="korum-button secondary" style={{ marginTop: '0.5rem' }} onClick={handleCopyAnchorPackage}>
+                                  <Copy size={13} /> {copyConfirmed ? 'Copied!' : 'Copy Package Anyway'}
+                                </button>
+                              )}
+                            </>
+                          )}
+                        </motion.div>
+                      )}
 
                       {pushResult && (
                         <motion.div
@@ -905,6 +1387,94 @@ export default function KorumLabDashboard() {
                           )}
                         </motion.div>
                       )}
+
+                      {/* Concept Lock Preview — Test Harness, not Foundry's real Forge.
+                          Scoped deliberately narrow: planning artifacts only, no code/repo/deploy.
+                          Tests one handoff — can a locked Concept Lock become an actionable
+                          implementation blueprint? Gated on a lock exactly like Send to ANCHOR. */}
+                      <div style={{ marginTop: '1rem', padding: '1rem', backgroundColor: 'rgba(94,154,255,0.04)', border: '1px solid rgba(94,154,255,0.25)', borderRadius: '8px' }}>
+                        <div style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.1em', color: '#5e9aff', marginBottom: '0.4rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <Network size={11} /> Concept Lock Preview (Test Harness — Not Real Forge)
+                        </div>
+                        <div style={{ fontSize: '0.72rem', color: 'var(--k-text-muted)', marginBottom: '0.75rem', fontStyle: 'italic' }}>
+                          {buildBlueprint?.note || "Quick sanity check of this Concept Lock's contents — not a build plan. The real build happens in Foundry's Forge."}
+                        </div>
+                        <button
+                          className="korum-button"
+                          style={{ width: '100%', backgroundColor: 'rgba(94,154,255,0.12)', color: '#5e9aff', border: '1px solid rgba(94,154,255,0.4)', boxShadow: 'none' }}
+                          onClick={handleGenerateBlueprint}
+                          disabled={isGeneratingBlueprint || !conceptLock || !conceptLock.id}
+                          title={
+                            !conceptLock
+                              ? 'Lock the concept first — Forge plans from approved patterns, not raw decisions.'
+                              : !conceptLock.id
+                                ? "Preview unavailable — this Concept Lock wasn't persisted (Neo4j was offline when it was locked)."
+                                : undefined
+                          }
+                        >
+                          {isGeneratingBlueprint ? (
+                            <><Activity size={14} style={{ animation: 'pulse 1s infinite' }} /> Generating Preview...</>
+                          ) : (
+                            <><FileCheck size={14} /> Generate Preview Blueprint</>
+                          )}
+                        </button>
+                        {blueprintError && (
+                          <div style={{ marginTop: '0.5rem', fontSize: '0.8rem', color: 'var(--k-danger)' }}>{blueprintError}</div>
+                        )}
+
+                        {buildBlueprint && (
+                          <motion.div
+                            initial={{ opacity: 0, y: 6 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            style={{ marginTop: '0.75rem' }}
+                          >
+                            <div style={{ marginBottom: '0.75rem' }}>
+                              <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', color: '#5e9aff', marginBottom: '0.3rem' }}>Product Brief</div>
+                              <div style={{ fontSize: '0.85rem', color: 'var(--k-text-main)' }}>{buildBlueprint.product_brief}</div>
+                            </div>
+                            <div style={{ marginBottom: '0.75rem' }}>
+                              <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', color: '#5e9aff', marginBottom: '0.3rem' }}>Architecture Blueprint</div>
+                              <div style={{ fontSize: '0.85rem', color: 'var(--k-text-main)', whiteSpace: 'pre-wrap' }}>{buildBlueprint.architecture_blueprint}</div>
+                            </div>
+
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '0.75rem' }}>
+                              <div>
+                                <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', color: '#5e9aff', marginBottom: '0.3rem' }}>Data Model</div>
+                                {buildBlueprint.data_model.map((d, i) => (
+                                  <div key={i} style={{ fontSize: '0.8rem', color: 'var(--k-text-muted)', display: 'flex', gap: '0.4rem', marginBottom: '0.2rem' }}><ChevronRight size={11} style={{ flexShrink: 0, marginTop: '2px' }} />{d}</div>
+                                ))}
+                              </div>
+                              <div>
+                                <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', color: '#5e9aff', marginBottom: '0.3rem' }}>Required Components</div>
+                                {buildBlueprint.required_components.map((c, i) => (
+                                  <div key={i} style={{ fontSize: '0.8rem', color: 'var(--k-text-muted)', display: 'flex', gap: '0.4rem', marginBottom: '0.2rem' }}><ChevronRight size={11} style={{ flexShrink: 0, marginTop: '2px' }} />{c}</div>
+                                ))}
+                              </div>
+                              <div>
+                                <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', color: '#5e9aff', marginBottom: '0.3rem' }}>Dependencies</div>
+                                {buildBlueprint.dependencies.map((d, i) => (
+                                  <div key={i} style={{ fontSize: '0.8rem', color: 'var(--k-text-muted)', display: 'flex', gap: '0.4rem', marginBottom: '0.2rem' }}><ChevronRight size={11} style={{ flexShrink: 0, marginTop: '2px' }} />{d}</div>
+                                ))}
+                              </div>
+                              <div>
+                                <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', color: '#5e9aff', marginBottom: '0.3rem' }}>Validation Gates</div>
+                                {buildBlueprint.validation_gates.map((v, i) => (
+                                  <div key={i} style={{ fontSize: '0.8rem', color: 'var(--k-text-muted)', display: 'flex', gap: '0.4rem', marginBottom: '0.2rem' }}><ChevronRight size={11} style={{ flexShrink: 0, marginTop: '2px' }} />{v}</div>
+                                ))}
+                              </div>
+                            </div>
+
+                            <div>
+                              <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', color: '#5e9aff', marginBottom: '0.3rem' }}>Build Phases</div>
+                              {buildBlueprint.build_phases.map((p, i) => (
+                                <div key={i} style={{ fontSize: '0.8rem', color: 'var(--k-text-muted)', display: 'flex', gap: '0.4rem', marginBottom: '0.2rem' }}><strong style={{ color: '#5e9aff' }}>{i + 1}.</strong>{p}</div>
+                              ))}
+                            </div>
+
+                            <div style={{ fontSize: '0.72rem', color: 'var(--k-text-muted)', marginTop: '0.6rem' }}>{buildBlueprint.graph_status}</div>
+                          </motion.div>
+                        )}
+                      </div>
                     </motion.div>
                   )}
 

@@ -8,11 +8,22 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from korum_lab.extractor import extract_structured_data, run_adversarial_rebuttal, run_governor_resolution
+from korum_lab.extractor import (
+    extract_structured_data,
+    run_adversarial_rebuttal,
+    run_governor_resolution,
+    run_blueprint_generation,
+)
 from korum_lab.models.strategy import Strategy
 from korum_lab.graph.driver import GraphConnection
 from korum_lab.graph.schema import setup_database
-from korum_lab.graph.loaders import insert_extracted_decision
+from korum_lab.graph.loaders import insert_extracted_decision, insert_concept_lock, insert_blueprint_preview
+from korum_lab.graph.queries import (
+    query_list_decisions,
+    query_decision_by_id,
+    query_concept_lock,
+    query_preview_for_lock,
+)
 
 app = FastAPI(title="Korum Decision Engine API")
 
@@ -24,6 +35,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class GovernanceConditions(BaseModel):
+    """Kept as distinct subfields, not flattened — each answers a different
+    question for a different downstream consumer:
+      decision_conditions      -> What must be true to approve this?     (approval gate)
+      required_validations     -> What must be checked before execution? (Foundry Build, pre-execution gate)
+      failure_triggers         -> What would force reversal or review?   (Foundry Build, reversal hook)
+      monitoring_requirements  -> What must be watched on an ongoing basis? (Watchtower hook)
+
+    Shared by /api/concept-lock's response and /api/push-to-anchor's request
+    — defined once, up top, so every
+    downstream consumer of a Concept Lock sees the same shape.
+    """
+    decision_conditions: List[str] = []
+    required_validations: List[str] = []
+    failure_triggers: List[str] = []
+    monitoring_requirements: List[str] = []
 
 
 class ExtractRequest(BaseModel):
@@ -143,20 +172,306 @@ async def extract_decision(req: ExtractRequest):
 
         # STEP 3: Graph Ontology Injection (Fail-safe for live demos without Docker running)
         graph_status = "Skipped"
+        decision_id = None
         try:
             with GraphConnection.get_session() as session:
                 setup_database(session)
-                session.execute_write(insert_extracted_decision, extracted, req.strategy)
+                decision_id = session.execute_write(
+                    insert_extracted_decision, extracted, req.strategy, score, status
+                )
             graph_status = "Injected into Neo4j Ontology"
         except Exception as e:
             graph_status = f"Offline / Bypass active (Neo4j not reachable: {str(e)})"
 
         data_dict["graph_injection_status"] = graph_status
+        # Lets the frontend reload this exact record from history later, and
+        # lets a follow-up "Send to Anchor" push reference its source decision.
+        data_dict["decision_id"] = decision_id
 
         return data_dict
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# History — every /api/extract call is already written into Neo4j as a
+# Decision node. These two endpoints just read that back, so past prompts
+# (lost on refresh because the UI only held them in memory) are recoverable.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/decisions")
+async def list_decisions(limit: int = 50):
+    try:
+        with GraphConnection.get_session() as session:
+            return session.execute_read(query_list_decisions, limit)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Neo4j not reachable: {str(e)}")
+
+
+@app.get("/api/decisions/{decision_id}")
+async def get_decision(decision_id: str):
+    try:
+        with GraphConnection.get_session() as session:
+            record = session.execute_read(query_decision_by_id, decision_id)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Neo4j not reachable: {str(e)}")
+
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Decision {decision_id} not found")
+    return record
+
+
+# ---------------------------------------------------------------------------
+# Concept Lock — per the KORUM Concept Lock Workflow, the goal is not to
+# store decisions; it's to freeze the *reasoning that produced an approved
+# architecture* into a reusable institutional pattern. A Concept Lock is
+# created once Council (the Governor step) reaches a stable verdict, and is
+# what gets sent to ANCHOR — not the raw decision dump.
+# ---------------------------------------------------------------------------
+
+class ConceptLockRequest(BaseModel):
+    project: str
+    decision_context: str
+    recommendation: str
+    assumptions: List[str]
+    risks: List[str]
+    unknowns: List[str]
+    final_decision: str                            # GO / NO-GO / CONDITIONAL
+    confidence_score: int
+    governor_rationale: str
+    new_risks_identified: Optional[List[str]] = []  # Red Team's net-new risks, folded into Risks
+    decision_conditions: Optional[List[str]] = []
+    required_validations: Optional[List[str]] = []
+    failure_triggers: Optional[List[str]] = []
+    monitoring_requirements: Optional[List[str]] = []
+    decision_id: Optional[str] = None               # Neo4j Decision.id this lock freezes
+
+
+@app.post("/api/concept-lock")
+async def lock_concept(req: ConceptLockRequest):
+    """
+    Freezes a Council-approved decision into a Concept Lock — Core Thesis,
+    Supporting Assumptions, Risks, Recommendations, Open Unknowns, and
+    Governance Conditions. Refuses to lock a NO-GO: a rejected decision
+    isn't a reusable pattern, it's a dead end, and shouldn't be archived
+    as institutional memory the same way an approved one is.
+
+    Governance Conditions stay split into four subfields rather than one
+    flat list — they answer different questions for different downstream
+    consumers: decision_conditions gate approval, required_validations gate
+    execution (Foundry Build), failure_triggers force reversal/review, and
+    monitoring_requirements are ongoing Watchtower hooks. Flattening them
+    would erase that distinction.
+    """
+    if req.final_decision == "NO-GO":
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot lock a NO-GO decision — Concept Locks capture approved patterns only.",
+        )
+
+    core_thesis = f"{req.project}: {req.decision_context} — {req.recommendation}"
+    # Council's Red Team can surface risks the original extraction missed;
+    # a Concept Lock should reflect what was actually weighed, not just
+    # what the first pass caught.
+    all_risks = list(dict.fromkeys(req.risks + (req.new_risks_identified or [])))
+    decision_conditions = req.decision_conditions or []
+    required_validations = req.required_validations or []
+    failure_triggers = req.failure_triggers or []
+    monitoring_requirements = req.monitoring_requirements or []
+    status = "LOCKED" if req.final_decision == "GO" else "CONDITIONAL_LOCK"
+
+    lock_id = None
+    try:
+        with GraphConnection.get_session() as session:
+            lock_id = session.execute_write(
+                insert_concept_lock,
+                req.decision_id,
+                core_thesis,
+                req.assumptions,
+                all_risks,
+                [req.recommendation],
+                req.unknowns,
+                decision_conditions,
+                required_validations,
+                failure_triggers,
+                monitoring_requirements,
+                status,
+            )
+        graph_status = "Locked into Neo4j Ontology"
+    except Exception as e:
+        graph_status = f"Offline / Bypass active (Neo4j not reachable: {str(e)})"
+
+    return {
+        "id": lock_id,
+        "decision_id": req.decision_id,
+        "status": status,
+        "core_thesis": core_thesis,
+        "supporting_assumptions": req.assumptions,
+        "risks": all_risks,
+        "recommendations": [req.recommendation],
+        "open_unknowns": req.unknowns,
+        "governance_conditions": {
+            "decision_conditions": decision_conditions,
+            "required_validations": required_validations,
+            "failure_triggers": failure_triggers,
+            "monitoring_requirements": monitoring_requirements,
+        },
+        "graph_status": graph_status,
+    }
+
+
+@app.get("/api/concept-lock/{lock_id}")
+async def get_concept_lock(lock_id: str):
+    try:
+        with GraphConnection.get_session() as session:
+            record = session.execute_read(query_concept_lock, lock_id)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Neo4j not reachable: {str(e)}")
+
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Concept Lock {lock_id} not found")
+
+    # Reassemble the four flat Neo4j properties into the nested shape clients expect.
+    return {
+        "id": record["id"],
+        "decision_id": record["decision_id"],
+        "status": record["status"],
+        "core_thesis": record["core_thesis"],
+        "supporting_assumptions": record["supporting_assumptions"] or [],
+        "risks": record["risks"] or [],
+        "recommendations": record["recommendations"] or [],
+        "open_unknowns": record["open_unknowns"] or [],
+        "governance_conditions": {
+            "decision_conditions": record["decision_conditions"] or [],
+            "required_validations": record["required_validations"] or [],
+            "failure_triggers": record["failure_triggers"] or [],
+            "monitoring_requirements": record["monitoring_requirements"] or [],
+        },
+        "locked_at": record["locked_at"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Concept Lock Preview Blueprint — test harness only, not Foundry's real Forge.
+# ---------------------------------------------------------------------------
+
+PREVIEW_BLUEPRINT_NOTE = (
+    "Test harness preview — not the canonical Forge build. Foundry's real Forge "
+    "produces the Implementation Blueprint."
+)
+
+
+def _list_block(values: List[str]) -> str:
+    return "\n".join(f"  - {value}" for value in (values or [])) or "  None."
+
+
+def _build_preview_summary(lock: dict) -> str:
+    """Renders the latest Concept Lock graph record for the preview generator."""
+    return f"""Concept Lock ID: {lock["id"]}
+Status: {lock["status"]}
+
+CORE THESIS
+{lock["core_thesis"]}
+
+SUPPORTING ASSUMPTIONS
+{_list_block(lock.get("supporting_assumptions"))}
+
+RISKS
+{_list_block(lock.get("risks"))}
+
+RECOMMENDATIONS
+{_list_block(lock.get("recommendations"))}
+
+OPEN UNKNOWNS
+{_list_block(lock.get("open_unknowns"))}
+
+GOVERNANCE CONDITIONS — Decision Conditions (must be true to approve)
+{_list_block(lock.get("decision_conditions"))}
+
+GOVERNANCE CONDITIONS — Required Validations (must be checked before execution)
+{_list_block(lock.get("required_validations"))}
+
+GOVERNANCE CONDITIONS — Failure Triggers (would force reversal or review)
+{_list_block(lock.get("failure_triggers"))}
+
+GOVERNANCE CONDITIONS — Monitoring Requirements (Watchtower hooks)
+{_list_block(lock.get("monitoring_requirements"))}"""
+
+
+def _preview_response(lock_id: str, blueprint_id: str, blueprint, graph_status: str) -> dict:
+    return {
+        "id": blueprint_id,
+        "lock_id": lock_id,
+        "status": "PREVIEW",
+        "is_preview": True,
+        "note": PREVIEW_BLUEPRINT_NOTE,
+        "product_brief": blueprint.product_brief,
+        "architecture_blueprint": blueprint.architecture_blueprint,
+        "data_model": blueprint.data_model,
+        "required_components": blueprint.required_components,
+        "dependencies": blueprint.dependencies,
+        "build_phases": blueprint.build_phases,
+        "validation_gates": blueprint.validation_gates,
+        "graph_status": graph_status,
+    }
+
+
+def _preview_record_response(lock_id: str, record: dict, graph_status: str) -> dict:
+    return {
+        "id": record["id"],
+        "lock_id": lock_id,
+        "status": "PREVIEW",
+        "is_preview": True,
+        "note": PREVIEW_BLUEPRINT_NOTE,
+        "product_brief": record["product_brief"],
+        "architecture_blueprint": record["architecture_blueprint"],
+        "data_model": record["data_model"] or [],
+        "required_components": record["required_components"] or [],
+        "dependencies": record["dependencies"] or [],
+        "build_phases": record["build_phases"] or [],
+        "validation_gates": record["validation_gates"] or [],
+        "graph_status": graph_status,
+    }
+
+
+@app.post("/api/concept-lock/{lock_id}/preview-blueprint")
+async def generate_preview_blueprint(lock_id: str):
+    try:
+        with GraphConnection.get_session() as session:
+            lock = session.execute_read(query_concept_lock, lock_id)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Neo4j not reachable: {str(e)}")
+
+    if lock is None:
+        raise HTTPException(status_code=404, detail=f"Concept Lock {lock_id} not found")
+
+    try:
+        blueprint = run_blueprint_generation(_build_preview_summary(lock))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Blueprint generation failed: {str(e)}")
+
+    try:
+        with GraphConnection.get_session() as session:
+            blueprint_id = session.execute_write(insert_blueprint_preview, lock_id, blueprint)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Neo4j not reachable: {str(e)}")
+
+    return _preview_response(lock_id, blueprint_id, blueprint, "Linked into Neo4j Ontology")
+
+
+@app.get("/api/concept-lock/{lock_id}/preview-blueprint")
+async def get_preview_blueprint(lock_id: str):
+    try:
+        with GraphConnection.get_session() as session:
+            record = session.execute_read(query_preview_for_lock, lock_id)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Neo4j not reachable: {str(e)}")
+
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Blueprint Preview for Concept Lock {lock_id} not found")
+
+    return _preview_record_response(lock_id, record, "Loaded from Neo4j")
 
 
 class RebuttalRequest(BaseModel):
@@ -434,6 +749,152 @@ async def push_to_korum(req: PushToKorumRequest):
         raise HTTPException(
             status_code=504,
             detail="KorumOS did not respond within 30 seconds. The query package is returned — submit manually if needed.",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Send to ANCHOR — write a Concept Lock into ANCHOR's institutional memory via
+# its service-to-service /api/anchor/ingest endpoint. Per the KORUM Concept
+# Lock Workflow, ANCHOR is the permanent memory layer for *approved patterns*,
+# not raw decisions — so this takes a locked Concept Lock (Core Thesis,
+# Supporting Assumptions, Risks, Recommendations, Open Unknowns, Governance
+# Conditions), not the original extraction. Lock it first via /api/concept-lock.
+# ---------------------------------------------------------------------------
+
+class PushToAnchorRequest(BaseModel):
+    project: str
+    core_thesis: str
+    supporting_assumptions: List[str]
+    risks: List[str]
+    recommendations: List[str]
+    open_unknowns: List[str]
+    governance_conditions: GovernanceConditions
+    status: str                                    # LOCKED / CONDITIONAL_LOCK
+    lock_id: Optional[str] = None                   # ConceptLock.id, for dedup/correlation
+    decision_id: Optional[str] = None               # Source Decision.id, for traceability
+
+
+def _build_anchor_package(req: PushToAnchorRequest) -> str:
+    """Renders the Concept Lock as a clean markdown knowledge record for ANCHOR's archive."""
+    assumptions_block = "\n".join(f"  - {a}" for a in req.supporting_assumptions) or "  None."
+    risks_block = "\n".join(f"  - {r}" for r in req.risks) or "  None."
+    recommendations_block = "\n".join(f"  - {r}" for r in req.recommendations) or "  None."
+    unknowns_block = "\n".join(f"  - {u}" for u in req.open_unknowns) or "  None."
+
+    gc = req.governance_conditions
+    decision_conditions_block = "\n".join(f"  - {c}" for c in gc.decision_conditions) or "  None."
+    required_validations_block = "\n".join(f"  - {v}" for v in gc.required_validations) or "  None."
+    failure_triggers_block = "\n".join(f"  - {t}" for t in gc.failure_triggers) or "  None."
+    monitoring_requirements_block = "\n".join(f"  - {m}" for m in gc.monitoring_requirements) or "  None."
+
+    return f"""# CONCEPT LOCK ({req.status}): {req.project}
+
+### CORE THESIS
+{req.core_thesis}
+
+### SUPPORTING ASSUMPTIONS
+{assumptions_block}
+
+### RISKS
+{risks_block}
+
+### RECOMMENDATIONS
+{recommendations_block}
+
+### OPEN UNKNOWNS
+{unknowns_block}
+
+### GOVERNANCE CONDITIONS
+
+**Decision Conditions** (what must be true to approve this)
+{decision_conditions_block}
+
+**Required Validations** (what must be checked before execution)
+{required_validations_block}
+
+**Failure Triggers** (what would force reversal or review)
+{failure_triggers_block}
+
+**Monitoring Requirements** (what Watchtower must keep watching)
+{monitoring_requirements_block}"""
+
+
+@app.post("/api/push-to-anchor")
+async def push_to_anchor(req: PushToAnchorRequest):
+    """
+    Archive a Concept Lock into ANCHOR's institutional memory so it's
+    searchable later — "Have we done this before? What assumptions
+    supported it? What risks were accepted?" Separate from Push-to-KorumOS,
+    which hands a decision to another council for execution planning.
+
+    Requires ANCHOR_URL and ANCHOR_API_KEY in environment (the same Bearer key
+    configured as ANCHOR_API_KEY on the anchor-runtime server). If the key isn't
+    set, returns the formatted package so the operator can ingest it manually.
+    """
+    anchor_url = os.getenv("ANCHOR_URL", "").rstrip("/")
+    anchor_api_key = os.getenv("ANCHOR_API_KEY", "").strip()
+    package = _build_anchor_package(req)
+
+    # --- Fallback: no API key configured — return the package for manual use ---
+    if not anchor_api_key:
+        return {
+            "status": "manual_required",
+            "message": "ANCHOR_API_KEY not configured. Copy the package below into ANCHOR.",
+            "query_package": package,
+            "anchor_url": anchor_url or None,
+        }
+
+    if not anchor_url:
+        raise HTTPException(status_code=500, detail="ANCHOR_URL not configured.")
+
+    payload = {
+        "content": package,
+        "source": "korum",
+        "entry_type": "concept_lock",
+        "collection": "korum_decisions",  # Concept Locks are the institutional-memory artifact KORUM contributes to ANCHOR.
+        "title": f"Concept Lock: {req.project}",
+        "project_id": req.project,
+        "mission_id": req.lock_id,
+        "metadata": {
+            "status": req.status,
+            "decision_id": req.decision_id,
+        },
+    }
+
+    headers = {
+        "Authorization": f"Bearer {anchor_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{anchor_url}/api/anchor/ingest",
+                json=payload,
+                headers=headers,
+            )
+
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                "status": data.get("status", "submitted"),
+                "anchor_response": data,
+                "query_package": package,
+            }
+        else:
+            return {
+                "status": "error",
+                "http_status": response.status_code,
+                "detail": response.text,
+                "query_package": package,  # Always return the package so work isn't lost
+            }
+
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail="ANCHOR did not respond within 30 seconds. The package is returned — ingest manually if needed.",
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
