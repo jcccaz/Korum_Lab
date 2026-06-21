@@ -178,13 +178,14 @@ def generate_escalation_reasons(
     evidence: List[str],
     missing_evidence_types: List[str],
     decision_type: str,
+    assumptions: List[str] | None = None,
+    risks: List[str] | None = None,
+    unknowns: List[str] | None = None,
 ) -> List[str]:
     """
-    Replaces the old templated 'Missing required evidence: X' strings with
-    reasoning grounded in the actual decision — not a copy of the Strategy
-    preset's required_evidence phrase. Called only when required evidence is
-    missing, so this adds cost only to requests that need an escalation gap
-    explained.
+    Converts candidate strategy checklist gaps into actual escalation reasons.
+    Candidate missing evidence types are not automatic triggers; the model may
+    return no reasons if the category is generic or immaterial to this decision.
     """
     client = OpenAI()
     response = client.beta.chat.completions.parse(
@@ -193,13 +194,25 @@ def generate_escalation_reasons(
             {
                 "role": "system",
                 "content": (
-                    "You explain evidence gaps for a governed decision pipeline. "
+                    "You decide whether candidate evidence gaps should become escalation "
+                    "triggers in a governed decision pipeline. "
                     "You are given a decision, its current evidence and recommendation, "
-                    "and a list of evidence categories that are missing per the "
-                    f"'{decision_type}' strategy. Write ONE sentence per missing "
-                    "category, specific to THIS decision — name the actual project/"
-                    "recommendation, don't just restate the category name. Do not "
-                    "soften or hedge; these are escalation flags, not suggestions."
+                    "plus generic evidence categories that are absent per the "
+                    f"'{decision_type}' strategy.\n\n"
+                    "Hard rule: the missing evidence categories are CANDIDATES, not "
+                    "automatic triggers. Return a reason only if that missing evidence "
+                    "is materially relevant to THIS decision and would change whether "
+                    "the recommendation should proceed.\n\n"
+                    "Do not restate, paraphrase, or synonym-swap the category labels. "
+                    "Do not produce market-analysis or stakeholder-input concerns "
+                    "unless this decision actually depends on external market adoption, "
+                    "competitive positioning, stakeholder approval, or leadership "
+                    "resource authorization.\n\n"
+                    "Prefer concrete gaps grounded in the decision's own risks and "
+                    "unknowns, such as storage impact, deduplication controls, access "
+                    "scope, retrieval-quality baseline, rollback criteria, or operational "
+                    "monitoring. If no candidate gap is truly material, return an empty "
+                    "reasons list. These are escalation flags, not filler."
                 ),
             },
             {
@@ -208,7 +221,10 @@ def generate_escalation_reasons(
                     f"DECISION: {decision_context}\n"
                     f"RECOMMENDATION: {recommendation}\n"
                     f"EXISTING EVIDENCE: {'; '.join(evidence) or 'None'}\n"
-                    f"MISSING EVIDENCE CATEGORIES: {', '.join(missing_evidence_types)}"
+                    f"ASSUMPTIONS: {'; '.join(assumptions or []) or 'None'}\n"
+                    f"RISKS: {'; '.join(risks or []) or 'None'}\n"
+                    f"UNKNOWNS: {'; '.join(unknowns or []) or 'None'}\n"
+                    f"CANDIDATE MISSING EVIDENCE CATEGORIES: {', '.join(missing_evidence_types)}"
                 ),
             },
         ],

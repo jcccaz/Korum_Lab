@@ -81,6 +81,31 @@ def _check_required_evidence(evidence_list: List[str], required_phrases: List[st
     return missing
 
 
+def _fallback_escalation_reasons(data_dict: dict) -> List[str]:
+    """Content-aware fallback when escalation LLM analysis is unavailable."""
+    recommendation = str(data_dict.get("recommendation") or "this recommendation").strip()
+    reasons = []
+    for unknown in data_dict.get("unknowns", []) or []:
+        unknown = str(unknown).strip()
+        if unknown:
+            reasons.append(
+                f"Resolve the open unknown '{unknown}' before acting on the recommendation: {recommendation}."
+            )
+        if len(reasons) >= 2:
+            return reasons
+
+    for risk in data_dict.get("risks", []) or []:
+        risk = str(risk).strip()
+        if risk:
+            reasons.append(
+                f"Define a control for the identified risk '{risk}' before acting on the recommendation: {recommendation}."
+            )
+        if len(reasons) >= 2:
+            return reasons
+
+    return reasons
+
+
 @app.post("/api/extract")
 async def extract_decision(req: ExtractRequest):
     if not os.environ.get("OPENAI_API_KEY"):
@@ -125,23 +150,26 @@ async def extract_decision(req: ExtractRequest):
             # Penalty: missing required evidence
             missing = _check_required_evidence(evidence_list, strategy.required_evidence)
             if missing:
-                score -= 25
                 try:
-                    governance_reason.extend(
-                        generate_escalation_reasons(
-                            decision_context=data_dict["decision_context"],
-                            recommendation=data_dict["recommendation"],
-                            evidence=evidence_list,
-                            missing_evidence_types=missing,
-                            decision_type=strategy.decision_type,
-                        )
+                    escalation_reasons = generate_escalation_reasons(
+                        decision_context=data_dict["decision_context"],
+                        recommendation=data_dict["recommendation"],
+                        evidence=evidence_list,
+                        missing_evidence_types=missing,
+                        decision_type=strategy.decision_type,
+                        assumptions=assumptions_list,
+                        risks=data_dict.get("risks", []),
+                        unknowns=unknowns_list,
                     )
                 except Exception:
-                    # Never let an LLM hiccup block extraction — fall back to
-                    # the old templated phrasing rather than losing the
-                    # escalation entirely.
-                    for m in missing:
-                        governance_reason.append(f"Missing required evidence: {m}")
+                    # Never let an LLM hiccup block extraction. Fall back to
+                    # the decision's own risks/unknowns instead of replaying
+                    # generic strategy checklist labels as escalation triggers.
+                    escalation_reasons = _fallback_escalation_reasons(data_dict)
+
+                if escalation_reasons:
+                    score -= 25
+                    governance_reason.extend(escalation_reasons)
 
             # Penalty: unknowns exceed evidence
             if len(unknowns_list) > len(evidence_list):
