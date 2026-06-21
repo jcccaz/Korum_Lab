@@ -208,6 +208,21 @@ export default function KorumLabDashboard() {
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [loadingDecisionId, setLoadingDecisionId] = useState<string | null>(null);
 
+  // Persistent activity indicator: names whichever long-running action is in
+  // flight so it's visible in the panel header no matter which button triggered
+  // it or how far the operator has scrolled. Only one normally runs at a time;
+  // priority order is just a tiebreak.
+  const activeAction: string | null =
+      isProcessing          ? "Querying LLM engine..."
+    : isAttacking           ? "Red Team attacking..."
+    : isResolving           ? "Governor resolving..."
+    : isRebutting           ? "Submitting rebuttal..."
+    : isLocking             ? "Locking concept..."
+    : isGeneratingBlueprint ? "Generating preview blueprint..."
+    : isSendingToAnchor     ? "Sending to ANCHOR..."
+    : isPushing             ? "Pushing to KorumOS..."
+    : null;
+
   const fetchHistory = async () => {
     setIsLoadingHistory(true);
     setHistoryError(null);
@@ -785,7 +800,15 @@ export default function KorumLabDashboard() {
             <h3 className="korum-card-title">
               <Network className="icon" /> Intelligence Construct
             </h3>
-            {result && (
+            {activeAction ? (
+              <div
+                role="status"
+                aria-live="polite"
+                style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.75rem', fontWeight: 600, color: '#0b0b0f', backgroundColor: 'var(--k-accent, #e0a93b)', padding: '4px 10px', borderRadius: '999px', textTransform: 'uppercase', letterSpacing: '0.04em', whiteSpace: 'nowrap', boxShadow: '0 0 0 1px rgba(224,169,59,0.4), 0 0 12px rgba(224,169,59,0.35)' }}
+              >
+                <Activity size={14} style={{ animation: 'pulse 1s infinite' }} /> {activeAction}
+              </div>
+            ) : result && (
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.75rem', color: 'var(--k-text-muted)', textTransform: 'uppercase' }}>
                 <FileCheck size={14} /> LIVE NEO4J STREAM
               </div>
