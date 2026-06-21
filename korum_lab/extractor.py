@@ -1,8 +1,10 @@
 from openai import OpenAI
+from typing import List
 
 from korum_lab.models.extraction import ExtractedDecision
 from korum_lab.models.governor import GovernorVerdict
 from korum_lab.models.blueprint import BuildBlueprint
+from korum_lab.models.escalation import EscalationAnalysis
 
 # --- Primary extraction: OpenAI gpt-4o (structured output, precision) ---
 def extract_structured_data(text: str) -> ExtractedDecision:
@@ -113,6 +115,51 @@ def run_governor_resolution(
         response_format=GovernorVerdict,
     )
     return response.choices[0].message.parsed
+
+
+def generate_escalation_reasons(
+    decision_context: str,
+    recommendation: str,
+    evidence: List[str],
+    missing_evidence_types: List[str],
+    decision_type: str,
+) -> List[str]:
+    """
+    Replaces the old templated 'Missing required evidence: X' strings with
+    reasoning grounded in the actual decision — not a copy of the Strategy
+    preset's required_evidence phrase. Called only when required evidence is
+    missing, so this adds cost only to requests that need an escalation gap
+    explained.
+    """
+    client = OpenAI()
+    response = client.beta.chat.completions.parse(
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You explain evidence gaps for a governed decision pipeline. "
+                    "You are given a decision, its current evidence and recommendation, "
+                    "and a list of evidence categories that are missing per the "
+                    f"'{decision_type}' strategy. Write ONE sentence per missing "
+                    "category, specific to THIS decision — name the actual project/"
+                    "recommendation, don't just restate the category name. Do not "
+                    "soften or hedge; these are escalation flags, not suggestions."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"DECISION: {decision_context}\n"
+                    f"RECOMMENDATION: {recommendation}\n"
+                    f"EXISTING EVIDENCE: {'; '.join(evidence) or 'None'}\n"
+                    f"MISSING EVIDENCE CATEGORIES: {', '.join(missing_evidence_types)}"
+                ),
+            },
+        ],
+        response_format=EscalationAnalysis,
+    )
+    return response.choices[0].message.parsed.reasons
 
 
 # --- Foundry Workshop Build: GPT-4o (structured planning, NOT code generation) ---

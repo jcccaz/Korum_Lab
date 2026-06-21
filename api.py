@@ -10,6 +10,7 @@ load_dotenv()
 
 from korum_lab.extractor import (
     extract_structured_data,
+    generate_escalation_reasons,
     run_adversarial_rebuttal,
     run_governor_resolution,
     run_blueprint_generation,
@@ -124,8 +125,22 @@ async def extract_decision(req: ExtractRequest):
             missing = _check_required_evidence(evidence_list, strategy.required_evidence)
             if missing:
                 score -= 25
-                for m in missing:
-                    governance_reason.append(f"Missing required evidence: {m}")
+                try:
+                    governance_reason.extend(
+                        generate_escalation_reasons(
+                            decision_context=data_dict["decision_context"],
+                            recommendation=data_dict["recommendation"],
+                            evidence=evidence_list,
+                            missing_evidence_types=missing,
+                            decision_type=strategy.decision_type,
+                        )
+                    )
+                except Exception:
+                    # Never let an LLM hiccup block extraction — fall back to
+                    # the old templated phrasing rather than losing the
+                    # escalation entirely.
+                    for m in missing:
+                        governance_reason.append(f"Missing required evidence: {m}")
 
             # Penalty: unknowns exceed evidence
             if len(unknowns_list) > len(evidence_list):
@@ -146,7 +161,7 @@ async def extract_decision(req: ExtractRequest):
             status = "HUMAN REVIEW REQUIRED"
             color = "warning"
         else:
-            status = "CONTESTED BY RED TEAM"
+            status = "LOW CONFIDENCE — EVIDENCE GAP"
             color = "danger"
 
         # Strategy overrides: enforce escalation rules
